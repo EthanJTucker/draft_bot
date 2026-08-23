@@ -10,6 +10,7 @@ import functools
 import itertools
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -25,6 +26,11 @@ PROJECTION_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
 
 class SleeperUnavailableError(RuntimeError):
     """A live endpoint failed and no cached copy exists to fall back on."""
+
+
+# Sentinel for "no usable cache file" (absent OR corrupt): a cached JSON
+# payload can legitimately be any value, including null.
+_MISSING = object()
 
 
 def default_http_get(
@@ -133,9 +139,9 @@ class SleeperClient:
     def get_players(self) -> dict:
         """The full NFL player map (~14 MB), refetched at most once a day."""
         if self._player_map_is_fresh():
-            return json.loads(
-                (self.cache_dir / "players.json").read_text(encoding="utf-8")
-            )
+            cached = self._load_cache_json(self.cache_dir / "players.json")
+            if cached is not _MISSING:
+                return cached
         url = f"{API_BASE}/players/nfl"
         payload, fetched_live = self._fetch_with_fallback("players", url)
         if fetched_live:
@@ -147,7 +153,9 @@ class SleeperClient:
         meta_file = self.cache_dir / "players.meta.json"
         if not (cache_file.exists() and meta_file.exists()):
             return False
-        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta = self._load_cache_json(meta_file)
+        if meta is _MISSING or not isinstance(meta, dict):
+            return False
         age = self._clock() - meta.get("fetched_at", float("-inf"))
         return 0 <= age < self.config.player_map_max_age_seconds
 
@@ -177,20 +185,42 @@ class SleeperClient:
         return payload, True
 
     def _write_cache(self, cache_name: str, payload) -> None:
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file = self.cache_dir / f"{cache_name}.json"
-        cache_file.write_text(json.dumps(payload), encoding="utf-8")
+        self._write_json_atomic(self.cache_dir / f"{cache_name}.json", payload)
 
     def _write_meta(self, cache_name: str, meta: dict) -> None:
+        self._write_json_atomic(self.cache_dir / f"{cache_name}.meta.json", meta)
+
+    def _write_json_atomic(self, path: Path, payload) -> None:
+        """Write to a temp file in the cache dir, then atomically replace:
+        a crash mid-write never leaves truncated JSON at the final name."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        meta_file = self.cache_dir / f"{cache_name}.meta.json"
-        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+        descriptor, tmp_name = tempfile.mkstemp(dir=self.cache_dir, suffix=".tmp")
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload))
+            os.replace(tmp_name, path)
+        finally:
+            # A no-op after a successful replace; removes the temp file if
+            # the serialization or the replace itself failed.
+            Path(tmp_name).unlink(missing_ok=True)
 
     def _read_cache(self, cache_name: str, cause: Exception):
         cache_file = self.cache_dir / f"{cache_name}.json"
-        if not cache_file.exists():
+        payload = self._load_cache_json(cache_file)
+        if payload is _MISSING:
             raise SleeperUnavailableError(
-                f"live fetch of '{cache_name}' failed and no cached copy "
-                f"exists at {cache_file}"
+                f"live fetch of '{cache_name}' failed and no usable cached "
+                f"copy exists at {cache_file}"
             ) from cause
-        return json.loads(cache_file.read_text(encoding="utf-8"))
+        return payload
+
+    @staticmethod
+    def _load_cache_json(path: Path):
+        """A cache file's payload, or ``_MISSING`` when the file is absent
+        or corrupt — a truncated write must read as cache-absent so the
+        degradation path degrades instead of raising."""
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # ValueError covers JSONDecodeError and UnicodeDecodeError.
+            return _MISSING

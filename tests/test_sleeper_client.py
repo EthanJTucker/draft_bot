@@ -184,6 +184,61 @@ def test_clock_rollback_invalidates_player_map_freshness(config, tmp_path):
     assert len(transport.requests) == 2
 
 
+def test_truncated_player_map_with_fresh_meta_refetches_live(config, tmp_path):
+    """A corrupt players.json under a fresh meta stamp (crash mid-write)
+    must refetch live, not raise JSONDecodeError at startup forever."""
+    transport = FakeTransport({"/players/nfl": {"4034": {"last_name": "Hill"}}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000_000.0
+    )
+    client.get_players()
+    (tmp_path / "players.json").write_text('{"4034": {"last_na', encoding="utf-8")
+
+    assert client.get_players()["4034"]["last_name"] == "Hill"
+    assert len(transport.requests) == 2
+
+
+def test_corrupt_player_meta_reads_as_not_fresh(config, tmp_path):
+    """An unreadable meta file means "not fresh": refetch, don't crash."""
+    transport = FakeTransport({"/players/nfl": {"4034": {"last_name": "Hill"}}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000_000.0
+    )
+    client.get_players()
+    (tmp_path / "players.meta.json").write_text("not json at all", encoding="utf-8")
+
+    assert client.get_players()["4034"]["last_name"] == "Hill"
+    assert len(transport.requests) == 2
+
+
+def test_corrupt_endpoint_cache_degrades_as_cache_absent(config, tmp_path):
+    """A corrupt cache file on the fallback path raises the clean
+    SleeperUnavailableError, never a raw JSONDecodeError mid-degradation."""
+    transport = FakeTransport({f"/league/{config.league_id}": {"name": "x"}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    client.get_league()
+    (tmp_path / "league.json").write_text("{truncated", encoding="utf-8")
+
+    transport.failing = True
+
+    with pytest.raises(SleeperUnavailableError):
+        client.get_league()
+
+
+def test_cache_writes_leave_only_the_final_files(config, tmp_path):
+    """Atomic writes: the temp file is always replaced or removed, so the
+    cache dir holds only the final JSON files."""
+    transport = FakeTransport({f"/league/{config.league_id}": {"name": "x"}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    client.get_league()
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["league.json"]
+
+
 def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
     """Startup snapshot: every endpoint fetched and persisted in one call."""
     transport = FakeTransport(
