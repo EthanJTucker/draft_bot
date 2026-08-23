@@ -208,6 +208,42 @@ def test_main_with_missing_config_prints_error_not_traceback(tmp_path):
     assert "config" in out.getvalue().lower()
 
 
+def test_main_with_malformed_toml_prints_error_not_traceback(tmp_path):
+    """A config file that is not valid TOML exits 2 with a message, not a
+    tomllib traceback."""
+    bad = tmp_path / "league_config.toml"
+    bad.write_text("[league\nname = broken", encoding="utf-8")
+    out = io.StringIO()
+
+    exit_code = main(
+        ["--config", str(bad)],
+        http_get=FakeTransport({}),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+
+    assert exit_code == 2
+    assert "config" in out.getvalue().lower()
+
+
+def test_main_with_missing_required_key_prints_error_not_traceback(tmp_path):
+    """Valid TOML missing a required section exits 2 with a message naming
+    the problem, not a KeyError traceback."""
+    partial = tmp_path / "league_config.toml"
+    partial.write_text('[league]\nname = "X"\n', encoding="utf-8")
+    out = io.StringIO()
+
+    exit_code = main(
+        ["--config", str(partial)],
+        http_get=FakeTransport({}),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+
+    assert exit_code == 2
+    assert "config" in out.getvalue().lower()
+
+
 def test_main_first_run_partial_failure_still_prints_a_summary(config, tmp_path):
     """Fresh machine, projections host down: the documented endpoints still
     snapshot and print, the failure is labeled, and the exit is nonzero."""

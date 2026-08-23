@@ -106,16 +106,19 @@ def _parse_bid(value) -> int | None:
 
     Integer-valued strings parse ("43", and "43.0" only because it is
     exactly integral); empty or garbage values become None rather than
-    crashing the poll loop.
+    crashing the poll loop. Negative values are garbage too: "-5" flowing
+    into a team's spend would silently credit its budget.
     """
     amount = _to_int(value)
-    if amount is not None:
-        return amount
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
+    if amount is None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        amount = int(number) if number.is_integer() else None
+    if amount is not None and amount < 0:
         return None
-    return int(number) if number.is_integer() else None
+    return amount
 
 
 def parse_draft(raw: dict) -> DraftState:

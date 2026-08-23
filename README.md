@@ -30,6 +30,10 @@ codes: 0 everything snapshotted, 1 summary printed but some endpoint had no
 data, 2 nothing ran (bad config path). Options: `--config` for an alternate
 league config, `--cache-dir` for an alternate cache location.
 
+Note for pre-August-2026 checkouts: draft and picks caches used to be written
+as un-keyed `draft.json`/`picks.json`; those filenames are now orphaned, so
+clear `data/cache/` once (or delete just those two files) after updating.
+
 League facts (IDs, budgets, roster shape, keeper constants) and the HTTP
 request timeout live in `league_config.toml`, not in code. The client can
 also fetch prior seasons' drafts (`get_draft(draft_id=...)` /

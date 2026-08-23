@@ -55,6 +55,14 @@ def test_malformed_bid_strings_parse_as_none_not_crash():
         assert parse_pick(raw).amount is None, bad
 
 
+def test_negative_bid_strings_parse_as_none_not_negative_dollars():
+    """A negative bid can never be real auction money: "-5" flowing into a
+    team's spend as -$5 would silently inflate its remaining budget."""
+    for bad in ("-5", "-1", "-5.0"):
+        raw = _raw_pick(metadata={"amount": bad})
+        assert parse_pick(raw).amount is None, bad
+
+
 def test_integral_float_bid_string_parses_as_int():
     """A bid serialized as "43.0" is exactly integral and must parse as 43."""
     assert parse_pick(_raw_pick(metadata={"amount": "43.0"})).amount == 43

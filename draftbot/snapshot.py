@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import tomllib
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Callable, TextIO
@@ -143,7 +144,7 @@ def main(
 
     Exit codes: 0 all endpoints snapshotted; 1 the summary printed but at
     least one endpoint had neither a live response nor a cache; 2 nothing
-    ran at all (bad config path or an unexpected client failure).
+    ran at all (missing, malformed, or incomplete config).
     """
     parser = argparse.ArgumentParser(
         prog="python -m draftbot.snapshot", description=__doc__
@@ -172,6 +173,15 @@ def main(
         config = load_config(config_path)
     except FileNotFoundError:
         print(f"error: config file not found: {config_path}", file=err)
+        return 2
+    except tomllib.TOMLDecodeError as error:
+        print(f"error: config file is not valid TOML: {config_path}: {error}", file=err)
+        return 2
+    except KeyError as error:
+        print(
+            f"error: config file {config_path} is missing required key {error}",
+            file=err,
+        )
         return 2
     # cache_dir resolution lives in load_config (anchored to the config
     # file's folder); the CLI only forwards an explicit override.
