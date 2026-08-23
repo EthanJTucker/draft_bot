@@ -1,0 +1,45 @@
+# League configuration for the 12th Week Campers draft bot.
+# Data, not code: next season is an edit here, not a code change.
+
+[league]
+name = "12th Week Campers"
+season = 2026
+league_id = "1389692302259138560"
+draft_id = "1389692302259138561"
+teams = 12
+
+# Prior drafts, used by later slices for price fitting and replay backtests.
+[league.historical_drafts]
+2025 = "1257407146123857920"
+2024 = "1124814732579045377"
+2023 = "992214922614067201"
+
+[auction]
+budget = 200
+
+# Drafted roster shape: 15 drafted slots (IR is extra, not drafted).
+[roster]
+QB = 1
+RB = 2
+WR = 2
+TE = 1
+FLEX = 1
+K = 1
+DEF = 1
+BN = 6
+IR = 2
+
+[keeper]
+cost_increment = 2        # keeper cost = prior winning bid + $2
+cost_floor = 5            # minimum keeper cost
+max_keepers = 3
+max_consecutive_years = 2 # a player may be kept at most 2 years in a row
+
+[me]
+username = "firstrider55"
+user_id = "868914670222921728"
+roster_id = 7
+
+[cache]
+dir = "data/cache"
+player_map_max_age_seconds = 86400

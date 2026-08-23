@@ -1,0 +1,20 @@
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+# keeper_ev2_reference.py is the verified keeper EV artifact from GAMEPLAN.md;
+# it stays byte-identical to the verified original until re-homed in v2.
+extend-exclude = "keeper_ev2_reference\\.py"
+
+[tool.isort]
+profile = "black"
+extend_skip = ["keeper_ev2_reference.py"]
+
+[tool.pylint.main]
+py-version = "3.11"
+
+[tool.pylint.format]
+max-line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

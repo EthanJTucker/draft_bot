@@ -1,0 +1,2 @@
+# Runtime dependencies (config parsing uses stdlib tomllib; no other deps).
+requests==2.34.2
