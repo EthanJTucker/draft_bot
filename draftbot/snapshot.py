@@ -15,7 +15,7 @@ from typing import Callable, TextIO
 
 from draftbot.config import LeagueConfig, load_config
 from draftbot.models import DraftState, parse_draft, parse_picks, spent_by_slot
-from draftbot.sleeper_client import SleeperClient
+from draftbot.sleeper_client import SleeperClient, SleeperUnavailableError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -62,8 +62,19 @@ def _team_lines(config: LeagueConfig, data: dict, state: DraftState) -> list[str
     return lines
 
 
-def build_summary(config: LeagueConfig, data: dict) -> str:
-    """Render the league summary from a full endpoint snapshot."""
+def build_summary(
+    config: LeagueConfig,
+    data: dict,
+    *,
+    degraded: set[str] | None = None,
+    failures: dict[str, str] | None = None,
+) -> str:
+    """Render the league summary from a full endpoint snapshot.
+
+    ``degraded`` names endpoints served from the disk cache (live fetch
+    failed); ``failures`` maps endpoints with no data at all to errors.
+    Both are labeled so cached bytes never read as a live feed.
+    """
     league = data.get("league", {})
     state = parse_draft(data.get("draft", {}))
     status = state.status + (" [PAUSED]" if state.paused else "")
@@ -79,6 +90,16 @@ def build_summary(config: LeagueConfig, data: dict) -> str:
             f"{_start_time_label(state)}"
         ),
     ]
+    if degraded:
+        lines.append(
+            "WARNING - served from disk cache, NOT live (live fetch "
+            "failed): " + ", ".join(sorted(degraded))
+        )
+    if failures:
+        lines.append(
+            "WARNING - unavailable (live fetch failed, no cache): "
+            + ", ".join(sorted(failures))
+        )
     if not state.budget_by_slot:
         lines.append(
             "Budgets: budgets not yet entered by the commissioner - "
@@ -104,6 +125,10 @@ def main(
 
     ``http_get``, ``clock``, and ``out`` are injectable for tests; the real
     CLI uses the requests transport, the wall clock, and stdout.
+
+    Exit codes: 0 all endpoints snapshotted; 1 the summary printed but at
+    least one endpoint had neither a live response nor a cache; 2 nothing
+    ran at all (bad config path or an unexpected client failure).
     """
     parser = argparse.ArgumentParser(
         prog="python -m draftbot.snapshot", description=__doc__
@@ -126,15 +151,31 @@ def main(
         # Windows console encoding crash the summary on draft night.
         sys.stdout.reconfigure(errors="replace")
 
+    err = out if out is not None else sys.stderr
     config_path = Path(args.config)
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except FileNotFoundError:
+        print(f"error: config file not found: {config_path}", file=err)
+        return 2
     # cache_dir resolution lives in load_config (anchored to the config
     # file's folder); the CLI only forwards an explicit override.
     cache_dir = Path(args.cache_dir) if args.cache_dir is not None else None
     client = SleeperClient(config, cache_dir=cache_dir, http_get=http_get, clock=clock)
-    data = client.snapshot_all()
-    print(build_summary(config, data), file=out if out is not None else sys.stdout)
-    return 0
+    try:
+        result = client.snapshot_all()
+    except SleeperUnavailableError as error:
+        # snapshot_all degrades per endpoint, so this is a safety net for
+        # unexpected total failures: a message, never a raw traceback.
+        print(f"error: {error}", file=err)
+        return 2
+    print(
+        build_summary(
+            config, result.data, degraded=result.degraded, failures=result.failures
+        ),
+        file=out if out is not None else sys.stdout,
+    )
+    return 1 if result.failures else 0
 
 
 if __name__ == "__main__":

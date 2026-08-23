@@ -12,6 +12,7 @@ import json
 import os
 import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -31,6 +32,21 @@ class SleeperUnavailableError(RuntimeError):
 # Sentinel for "no usable cache file" (absent OR corrupt): a cached JSON
 # payload can legitimately be any value, including null.
 _MISSING = object()
+
+
+@dataclass
+class SnapshotResult:
+    """A best-effort full snapshot.
+
+    ``data`` holds every endpoint that produced a payload (live or cached);
+    ``degraded`` names the endpoints served from the disk cache because the
+    live fetch failed; ``failures`` maps endpoints with neither a live
+    response nor a cache to their error messages.
+    """
+
+    data: dict = field(default_factory=dict)
+    degraded: set[str] = field(default_factory=set)
+    failures: dict[str, str] = field(default_factory=dict)
 
 
 def default_http_get(
@@ -68,6 +84,11 @@ class SleeperClient:
             )
         self._http_get = http_get
         self._clock = clock
+        # True iff the most recent fetch attempted the live API, failed,
+        # and served the disk cache instead. Poll-loop consumers read it
+        # right after each get_* call to tell a dead feed from live data
+        # (a by-design daily player-map cache hit is NOT degradation).
+        self.last_fetch_degraded: bool = False
         # Bust tokens are unique per request (counter), per instance and
         # process (prefix), and across restarts (clock seed).
         self._cache_bust_prefix = (
@@ -120,27 +141,40 @@ class SleeperClient:
         url = f"{PROJECTIONS_BASE}/{year}?season_type=regular&{positions}"
         return self._fetch_json(f"projections_{year}", url)
 
-    def snapshot_all(self) -> dict:
+    def snapshot_all(self) -> SnapshotResult:
         """Fetch every endpoint once and snapshot each payload to disk.
 
         Run at startup so the draft-night dashboard can degrade to cached
-        data if any live endpoint breaks later.
+        data if any live endpoint breaks later. Degrades per endpoint: one
+        broken endpoint (recorded in ``failures``) never aborts the rest,
+        and endpoints served from cache are recorded in ``degraded``.
         """
-        return {
-            "league": self.get_league(),
-            "draft": self.get_draft(),
-            "picks": self.get_picks(),
-            "rosters": self.get_rosters(),
-            "users": self.get_users(),
-            "players": self.get_players(),
-            "projections": self.get_projections(),
-        }
+        fetchers: tuple[tuple[str, Callable[[], object]], ...] = (
+            ("league", self.get_league),
+            ("draft", self.get_draft),
+            ("picks", self.get_picks),
+            ("rosters", self.get_rosters),
+            ("users", self.get_users),
+            ("players", self.get_players),
+            ("projections", self.get_projections),
+        )
+        result = SnapshotResult()
+        for name, fetch in fetchers:
+            try:
+                result.data[name] = fetch()
+            except SleeperUnavailableError as error:
+                result.failures[name] = str(error)
+                continue
+            if self.last_fetch_degraded:
+                result.degraded.add(name)
+        return result
 
     def get_players(self) -> dict:
         """The full NFL player map (~14 MB), refetched at most once a day."""
         if self._player_map_is_fresh():
             cached = self._load_cache_json(self.cache_dir / "players.json")
             if cached is not _MISSING:
+                self.last_fetch_degraded = False  # a by-design daily hit
                 return cached
         url = f"{API_BASE}/players/nfl"
         payload, fetched_live = self._fetch_with_fallback("players", url)
@@ -180,8 +214,11 @@ class SleeperClient:
         except Exception as error:  # pylint: disable=broad-exception-caught
             # Any transport failure (connection, HTTP status, bad JSON) must
             # degrade to the cache, not crash mid-draft.
-            return self._read_cache(cache_name, error), False
+            payload = self._read_cache(cache_name, error)
+            self.last_fetch_degraded = True
+            return payload, False
         self._write_cache(cache_name, payload)
+        self.last_fetch_degraded = False
         return payload, True
 
     def _write_cache(self, cache_name: str, payload) -> None:

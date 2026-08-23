@@ -146,6 +146,69 @@ def test_main_snapshots_and_prints_summary(config, tmp_path):
     assert Path(tmp_path / "projections_2026.json").exists()
 
 
+def test_summary_labels_endpoints_served_from_cache(config):
+    """Cached-not-live data is labeled: identical bytes must not read as a
+    live feed on draft night."""
+    out = build_summary(config, _snapshot_data(), degraded={"draft", "picks"})
+    assert "served from disk cache" in out
+    assert "draft, picks" in out
+
+
+def test_main_with_missing_config_prints_error_not_traceback(tmp_path):
+    """A bad --config path exits with a message, not a raw traceback."""
+    out = io.StringIO()
+
+    exit_code = main(
+        ["--config", str(tmp_path / "missing.toml")],
+        http_get=FakeTransport({}),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+
+    assert exit_code == 2
+    assert "config" in out.getvalue().lower()
+
+
+def test_main_first_run_partial_failure_still_prints_a_summary(config, tmp_path):
+    """Fresh machine, projections host down: the documented endpoints still
+    snapshot and print, the failure is labeled, and the exit is nonzero."""
+    transport = _transport_for(config, _snapshot_data())
+    del transport.payloads["/projections/nfl/2026"]
+    out = io.StringIO()
+
+    exit_code = main(
+        ["--cache-dir", str(tmp_path)],
+        http_get=transport,
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+
+    assert exit_code == 1
+    printed = out.getvalue()
+    assert "12th Week Campers" in printed
+    assert "unavailable" in printed
+    assert "projections" in printed
+    assert (tmp_path / "league.json").exists()
+
+
+def test_main_total_first_run_failure_exits_cleanly(tmp_path):
+    """No cache and every endpoint down: labeled failures and a nonzero
+    exit, never an uncaught exception."""
+    transport = FakeTransport({})
+    transport.failing = True
+    out = io.StringIO()
+
+    exit_code = main(
+        ["--cache-dir", str(tmp_path)],
+        http_get=transport,
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+
+    assert exit_code == 1
+    assert "unavailable" in out.getvalue()
+
+
 def test_cli_default_cache_dir_follows_the_config_file(config, tmp_path):
     """Without --cache-dir the cache lands next to the given config file,
     never in the process CWD."""

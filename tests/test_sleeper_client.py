@@ -184,6 +184,107 @@ def test_clock_rollback_invalidates_player_map_freshness(config, tmp_path):
     assert len(transport.requests) == 2
 
 
+def test_degraded_fetch_is_visible_to_the_consumer(config, tmp_path):
+    """The fallback payload is byte-identical to the live one, so the
+    ``last_fetch_degraded`` flag is the only way the ~2s poll loop or the
+    dashboard can tell a dead feed from a quiet auction."""
+    payload = {"league_id": config.league_id, "name": "12th Week Campers"}
+    transport = FakeTransport({f"/league/{config.league_id}": payload})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    assert client.last_fetch_degraded is False
+    assert client.get_league() == payload
+    assert client.last_fetch_degraded is False
+
+    transport.failing = True
+
+    assert client.get_league() == payload  # identical bytes, cached source
+    assert client.last_fetch_degraded is True
+
+    transport.failing = False
+
+    client.get_league()
+    assert client.last_fetch_degraded is False
+
+
+def test_fresh_player_map_cache_hit_is_not_degraded(config, tmp_path):
+    """The daily player-map cache hit is by design, not degradation."""
+    transport = FakeTransport({"/players/nfl": {"4034": {"last_name": "Hill"}}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000_000.0
+    )
+    client.get_players()
+
+    transport.failing = True  # network dead, but the map is still fresh
+
+    assert client.get_players()["4034"]["last_name"] == "Hill"
+    assert client.last_fetch_degraded is False
+
+
+def test_snapshot_all_degrades_per_endpoint(config, tmp_path):
+    """One endpoint fully down with no cache must not abort the snapshot:
+    the rest is fetched and the failure is reported by name."""
+    transport = FakeTransport(
+        {
+            "/picks": [],
+            "/rosters": [{"roster_id": 7}],
+            "/users": [{"user_id": config.my_user_id}],
+            "/players/nfl": {"4034": {"last_name": "Hill"}},
+            f"/draft/{config.draft_id}": {"status": "pre_draft"},
+            f"/league/{config.league_id}": {"name": "12th Week Campers"},
+            # no projections payload: that endpoint 's live fetch fails
+        }
+    )
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+
+    result = client.snapshot_all()
+
+    assert result.data["league"]["name"] == "12th Week Campers"
+    assert result.data["players"]["4034"]["last_name"] == "Hill"
+    assert "projections" not in result.data
+    assert list(result.failures) == ["projections"]
+    assert not result.degraded
+
+
+def test_snapshot_all_marks_cached_endpoints_after_an_outage(config, tmp_path):
+    """A snapshot during an outage serves the cache and says so per
+    endpoint (the fresh player map is a by-design hit, not degradation)."""
+    transport = FakeTransport(
+        {
+            "/picks": [],
+            "/rosters": [],
+            "/users": [],
+            "/players/nfl": {"4034": {"last_name": "Hill"}},
+            "/projections/nfl/2026": [],
+            f"/draft/{config.draft_id}": {"status": "pre_draft"},
+            f"/league/{config.league_id}": {"name": "12th Week Campers"},
+        }
+    )
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    first = client.snapshot_all()
+    assert not first.failures
+    assert not first.degraded
+
+    transport.failing = True
+
+    second = client.snapshot_all()
+    assert second.data["league"] == first.data["league"]
+    assert not second.failures
+    assert second.degraded == {
+        "league",
+        "draft",
+        "picks",
+        "rosters",
+        "users",
+        "projections",
+    }
+
+
 def test_truncated_player_map_with_fresh_meta_refetches_live(config, tmp_path):
     """A corrupt players.json under a fresh meta stamp (crash mid-write)
     must refetch live, not raise JSONDecodeError at startup forever."""
@@ -256,8 +357,11 @@ def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
         config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
     )
 
-    snapshot = client.snapshot_all()
+    result = client.snapshot_all()
 
+    snapshot = result.data
+    assert not result.failures
+    assert not result.degraded
     assert snapshot["league"]["name"] == "12th Week Campers"
     assert snapshot["draft"]["status"] == "pre_draft"
     assert snapshot["picks"] == [{"player_id": "4034"}]
