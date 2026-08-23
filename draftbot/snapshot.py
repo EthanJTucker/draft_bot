@@ -69,7 +69,7 @@ def build_summary(config: LeagueConfig, data: dict) -> str:
     status = state.status + (" [PAUSED]" if state.paused else "")
     lines = [
         (
-            f"League: {league.get('name', '(unknown)')} — "
+            f"League: {league.get('name', '(unknown)')} - "
             f"season {league.get('season', '?')}, "
             f"{league.get('total_rosters', config.teams)} teams, "
             f"${config.auction_budget} auction"
@@ -81,7 +81,7 @@ def build_summary(config: LeagueConfig, data: dict) -> str:
     ]
     if not state.budget_by_slot:
         lines.append(
-            "Budgets: budgets not yet entered by the commissioner — "
+            "Budgets: budgets not yet entered by the commissioner - "
             f"all teams shown at the ${config.auction_budget} default"
         )
     lines.append("Teams (by draft slot):")
@@ -120,6 +120,11 @@ def main(
         "resolved against the config file's folder)",
     )
     args = parser.parse_args(argv)
+
+    if out is None and hasattr(sys.stdout, "reconfigure"):
+        # Team names are user data (curly quotes, emoji); never let a
+        # Windows console encoding crash the summary on draft night.
+        sys.stdout.reconfigure(errors="replace")
 
     config_path = Path(args.config)
     config = load_config(config_path)
