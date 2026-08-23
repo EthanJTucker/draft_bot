@@ -43,3 +43,6 @@ roster_id = 7
 [cache]
 dir = "data/cache"
 player_map_max_age_seconds = 86400
+
+[http]
+request_timeout_seconds = 15  # per-request timeout; tune lower for draft-night polling

@@ -104,10 +104,9 @@ def test_summary_reports_auction_spend_by_slot(config):
     assert "drafting" in out
 
 
-def test_main_snapshots_and_prints_summary(config, tmp_path):
-    """The CLI fetches everything, caches to disk, and prints the summary."""
-    data = _snapshot_data()
-    transport = FakeTransport(
+def _transport_for(config, data):
+    """A FakeTransport serving a full endpoint snapshot for this league."""
+    return FakeTransport(
         {
             "/picks": data["picks"],
             "/rosters": data["rosters"],
@@ -118,6 +117,12 @@ def test_main_snapshots_and_prints_summary(config, tmp_path):
             f"/league/{config.league_id}": data["league"],
         }
     )
+
+
+def test_main_snapshots_and_prints_summary(config, tmp_path):
+    """The CLI fetches everything, caches to disk, and prints the summary."""
+    data = _snapshot_data()
+    transport = _transport_for(config, data)
     out = io.StringIO()
 
     exit_code = main(
@@ -139,3 +144,22 @@ def test_main_snapshots_and_prints_summary(config, tmp_path):
     assert Path(tmp_path / "league.json").exists()
     assert Path(tmp_path / "players.json").exists()
     assert Path(tmp_path / "projections_2026.json").exists()
+
+
+def test_cli_default_cache_dir_follows_the_config_file(config, tmp_path):
+    """Without --cache-dir the cache lands next to the given config file,
+    never in the process CWD."""
+    config_text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    config_file = tmp_path / "league_config.toml"
+    config_file.write_text(config_text, encoding="utf-8")
+    transport = _transport_for(config, _snapshot_data())
+
+    exit_code = main(
+        ["--config", str(config_file)],
+        http_get=transport,
+        clock=lambda: 1_000.0,
+        out=io.StringIO(),
+    )
+
+    assert exit_code == 0
+    assert (tmp_path / "data" / "cache" / "league.json").exists()

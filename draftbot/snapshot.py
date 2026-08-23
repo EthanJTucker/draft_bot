@@ -128,10 +128,9 @@ def main(
 
     config_path = Path(args.config)
     config = load_config(config_path)
-    if args.cache_dir is not None:
-        cache_dir = Path(args.cache_dir)
-    else:
-        cache_dir = config_path.resolve().parent / config.cache_dir
+    # cache_dir resolution lives in load_config (anchored to the config
+    # file's folder); the CLI only forwards an explicit override.
+    cache_dir = Path(args.cache_dir) if args.cache_dir is not None else None
     client = SleeperClient(config, cache_dir=cache_dir, http_get=http_get, clock=clock)
     data = client.snapshot_all()
     print(build_summary(config, data), file=out if out is not None else sys.stdout)

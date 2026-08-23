@@ -8,10 +8,18 @@ is a config edit, not a code change.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 DEFAULT_CONFIG_PATH = Path("league_config.toml")
+
+# Fallbacks for optional TOML keys — defined once here; the checked-in
+# league_config.toml states its own (possibly different) explicit values.
+DEFAULT_CACHE_DIR = "data/cache"
+DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS = 86400
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 
 
 @dataclass(frozen=True)
@@ -27,7 +35,7 @@ class LeagueConfig:
     draft_id: str
     teams: int
     auction_budget: int
-    roster_slots: dict[str, int]
+    roster_slots: Mapping[str, int]
     keeper_cost_increment: int
     keeper_cost_floor: int
     max_keepers: int
@@ -35,9 +43,22 @@ class LeagueConfig:
     my_username: str
     my_user_id: str
     my_roster_id: int
-    historical_draft_ids: dict[str, str] = field(default_factory=dict)
-    cache_dir: str = "data/cache"
-    player_map_max_age_seconds: int = 86400
+    historical_draft_ids: Mapping[str, str] = field(default_factory=dict)
+    cache_dir: str = DEFAULT_CACHE_DIR
+    player_map_max_age_seconds: int = DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS
+    request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+    def __post_init__(self):
+        # frozen=True alone leaves the mapping fields mutable; wrap them in
+        # read-only proxies so shared config cannot be silently mutated.
+        object.__setattr__(
+            self, "roster_slots", MappingProxyType(dict(self.roster_slots))
+        )
+        object.__setattr__(
+            self,
+            "historical_draft_ids",
+            MappingProxyType(dict(self.historical_draft_ids)),
+        )
 
     @property
     def drafted_slots(self) -> int:
@@ -46,13 +67,19 @@ class LeagueConfig:
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
-    """Read ``league_config.toml`` (or another TOML file) into a LeagueConfig."""
+    """Read ``league_config.toml`` (or another TOML file) into a LeagueConfig.
+
+    ``cache_dir`` is resolved here, against the config file's folder — the
+    single resolution rule for every consumer (client and CLI alike).
+    """
     with open(path, "rb") as handle:
         raw = tomllib.load(handle)
     league = raw["league"]
     keeper = raw["keeper"]
     me = raw["me"]
     cache = raw.get("cache", {})
+    http = raw.get("http", {})
+    config_dir = Path(path).resolve().parent
     return LeagueConfig(
         league_name=league["name"],
         season=league["season"],
@@ -69,6 +96,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
         my_user_id=me["user_id"],
         my_roster_id=me["roster_id"],
         historical_draft_ids=dict(league.get("historical_drafts", {})),
-        cache_dir=cache.get("dir", "data/cache"),
-        player_map_max_age_seconds=cache.get("player_map_max_age_seconds", 86400),
+        cache_dir=str(config_dir / cache.get("dir", DEFAULT_CACHE_DIR)),
+        player_map_max_age_seconds=cache.get(
+            "player_map_max_age_seconds", DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS
+        ),
+        request_timeout_seconds=http.get(
+            "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS
+        ),
     )

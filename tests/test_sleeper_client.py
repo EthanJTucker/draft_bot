@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import sys
+import types
 
 import pytest
 
@@ -130,6 +133,25 @@ def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
         "projections_2026",
     ):
         assert (tmp_path / f"{name}.json").exists(), name
+
+
+def test_default_transport_uses_the_config_timeout(config, tmp_path, monkeypatch):
+    """The requests transport takes its timeout from the config, so draft
+    night can tune it in the TOML without a code change."""
+    captured = {}
+
+    def fake_get(url, timeout=None):  # pylint: disable=unused-argument  # the
+        # url is the transport's business; this fake only captures the timeout.
+        captured["timeout"] = timeout
+        return types.SimpleNamespace(content=b"{}", raise_for_status=lambda: None)
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=fake_get))
+    tuned = dataclasses.replace(config, request_timeout_seconds=3)
+    client = SleeperClient(tuned, cache_dir=tmp_path, clock=lambda: 1_000.0)
+
+    client.get_league()
+
+    assert captured["timeout"] == 3
 
 
 def test_projections_url_uses_com_host_with_positions(config, tmp_path):

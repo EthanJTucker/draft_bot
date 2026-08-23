@@ -6,13 +6,14 @@ inject fakes; the default transport uses ``requests`` with a timeout.
 
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import time
 from pathlib import Path
 from typing import Callable
 
-from draftbot.config import LeagueConfig
+from draftbot.config import DEFAULT_REQUEST_TIMEOUT_SECONDS, LeagueConfig
 
 API_BASE = "https://api.sleeper.app/v1"
 
@@ -20,20 +21,20 @@ API_BASE = "https://api.sleeper.app/v1"
 PROJECTIONS_BASE = "https://api.sleeper.com/projections/nfl"
 PROJECTION_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
 
-REQUEST_TIMEOUT_SECONDS = 15
-
 
 class SleeperUnavailableError(RuntimeError):
     """A live endpoint failed and no cached copy exists to fall back on."""
 
 
-def default_http_get(url: str) -> bytes:
+def default_http_get(
+    url: str, timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+) -> bytes:
     """Fetch a URL with requests; raises on HTTP errors."""
     # Imported here so unit tests (which always inject a fake transport)
     # never need the requests package on the hot path.
     import requests  # pylint: disable=import-outside-toplevel
 
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(url, timeout=timeout)
     response.raise_for_status()
     return response.content
 
@@ -50,7 +51,11 @@ class SleeperClient:
     ):
         self.config = config
         self.cache_dir = Path(cache_dir if cache_dir is not None else config.cache_dir)
-        self._http_get = http_get if http_get is not None else default_http_get
+        if http_get is None:
+            http_get = functools.partial(
+                default_http_get, timeout=config.request_timeout_seconds
+            )
+        self._http_get = http_get
         self._clock = clock
         # Monotonic per-request counter, seeded from the clock so restarts
         # of the process never reuse a recent value.
