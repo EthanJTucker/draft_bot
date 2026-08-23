@@ -21,12 +21,20 @@ python -m draftbot.snapshot
 ```
 
 Fetches the league, draft, picks, rosters, users, the daily player map, and
-season projections into `data/cache/` (gitignored) and prints a league summary
-with teams, budgets, keeper counts, and draft status. Options: `--config` for
-an alternate league config, `--cache-dir` for an alternate cache location.
+season projections into `data/cache/` (gitignored, resolved next to the
+config file) and prints a league summary with teams in draft-slot order,
+budgets, keeper counts, and draft status. The snapshot degrades per
+endpoint: if a live fetch fails, the cached copy is served and labeled in
+the summary, and endpoints with no cache are listed as unavailable. Exit
+codes: 0 everything snapshotted, 1 summary printed but some endpoint had no
+data, 2 nothing ran (bad config path). Options: `--config` for an alternate
+league config, `--cache-dir` for an alternate cache location.
 
-League facts (IDs, budgets, roster shape, keeper constants) live in
-`league_config.toml`, not in code.
+League facts (IDs, budgets, roster shape, keeper constants) and the HTTP
+request timeout live in `league_config.toml`, not in code. The client can
+also fetch prior seasons' drafts (`get_draft(draft_id=...)` /
+`get_picks(draft_id=...)`); each draft caches under its own id, so
+historical fetches never touch the live draft's fallback cache.
 
 ## Tests and lint
 

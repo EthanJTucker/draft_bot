@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from datetime import timedelta, timezone
 from pathlib import Path
 
 from draftbot.snapshot import build_summary, main
@@ -144,6 +145,44 @@ def test_main_snapshots_and_prints_summary(config, tmp_path):
     assert Path(tmp_path / "league.json").exists()
     assert Path(tmp_path / "players.json").exists()
     assert Path(tmp_path / "projections_2026.json").exists()
+
+
+def test_teams_print_in_draft_slot_order_not_roster_id_order(config):
+    """Slot assignment is independent of roster id in a real draft; the
+    "by draft slot" listing must actually sort by slot."""
+    data = _snapshot_data(draft_settings={"budget_1": 143, "budget_5": 96})
+    # Cross the mapping: roster 7 sits in slot 1, roster 1 in slot 5.
+    data["draft"]["slot_to_roster_id"] = {"1": 7, "5": 1}
+    out = build_summary(config, data)
+
+    team_lines = [line for line in out.splitlines() if "budget $" in line]
+    assert "firstrider55" in team_lines[0]  # roster 7 is in slot 1 now
+    assert "Team Alice" in team_lines[1]
+
+
+def test_partially_entered_budgets_label_defaulted_teams(config):
+    """With budget_<slot> half-entered, a team lacking its key must show
+    the $200 fallback explicitly labeled, not an unlabeled $200."""
+    data = _snapshot_data(draft_settings={"budget_1": 143})
+    out = build_summary(config, data)
+
+    alice_line = next(line for line in out.splitlines() if "Team Alice" in line)
+    my_line = next(line for line in out.splitlines() if "firstrider55" in line)
+    assert "$143" in alice_line
+    assert "(default)" not in alice_line
+    assert "$200 (default)" in my_line
+
+
+def test_start_time_renders_in_the_given_timezone(config):
+    """A Sunday-evening Denver draft must not print as Monday UTC; the
+    zone is injectable so the test is machine-independent."""
+    data = _snapshot_data()
+    # 2026-08-31 00:15 UTC == 2026-08-30 18:15 in UTC-6 (Denver in DST).
+    data["draft"]["start_time"] = 1_788_135_300_000
+    out = build_summary(config, data, tz=timezone(timedelta(hours=-6)))
+
+    assert "starts 2026-08-30 18:15" in out
+    assert "2026-08-31" not in out
 
 
 def test_summary_labels_endpoints_served_from_cache(config):

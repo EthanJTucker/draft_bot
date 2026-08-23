@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Callable, TextIO
 
@@ -34,11 +34,14 @@ def _keeper_label(roster: dict) -> str:
     return f"keepers: {len(keepers)}"
 
 
-def _start_time_label(state: DraftState) -> str:
+def _start_time_label(state: DraftState, tz: tzinfo | None = None) -> str:
     if state.start_time is None:
         return "start time n/a"
     moment = datetime.fromtimestamp(state.start_time / 1000, tz=timezone.utc)
-    return f"starts {moment.isoformat()}"
+    # tz=None renders in the machine's local timezone: a Sunday-evening
+    # Denver draft must not read as Monday UTC. Injectable for tests.
+    local = moment.astimezone(tz)
+    return f"starts {local.strftime('%Y-%m-%d %H:%M %Z')}"
 
 
 def _team_lines(config: LeagueConfig, data: dict, state: DraftState) -> list[str]:
@@ -47,16 +50,26 @@ def _team_lines(config: LeagueConfig, data: dict, state: DraftState) -> list[str
     slot_by_roster = {
         roster_id: slot for slot, roster_id in state.slot_to_roster_id.items()
     }
-    lines = []
-    rosters = sorted(data.get("rosters", []), key=lambda r: r.get("roster_id", 0))
-    for roster in rosters:
+
+    def slot_order(roster: dict):
         slot = slot_by_roster.get(roster.get("roster_id"))
-        budget = state.budget_by_slot.get(slot, config.auction_budget)
+        # Slot order (unknown slots last), roster id as the tiebreaker.
+        return (slot is None, slot or 0, roster.get("roster_id", 0))
+
+    lines = []
+    for roster in sorted(data.get("rosters", []), key=slot_order):
+        slot = slot_by_roster.get(roster.get("roster_id"))
+        if slot in state.budget_by_slot:
+            budget_label = f"budget ${state.budget_by_slot[slot]}"
+        else:
+            # Label every fallback, so a half-entered budget_<slot> map
+            # never shows an unlabeled $200 next to real keeper budgets.
+            budget_label = f"budget ${config.auction_budget} (default)"
         slot_label = f"slot {slot:>2}" if slot is not None else "slot  ?"
         name = _team_name(users_by_id.get(roster.get("owner_id")))
         lines.append(
             f"  {slot_label}  {name:<24} "
-            f"budget ${budget}  spent ${spent.get(slot, 0)}  "
+            f"{budget_label}  spent ${spent.get(slot, 0)}  "
             f"{_keeper_label(roster)}"
         )
     return lines
@@ -68,12 +81,14 @@ def build_summary(
     *,
     degraded: set[str] | None = None,
     failures: dict[str, str] | None = None,
+    tz: tzinfo | None = None,
 ) -> str:
     """Render the league summary from a full endpoint snapshot.
 
     ``degraded`` names endpoints served from the disk cache (live fetch
     failed); ``failures`` maps endpoints with no data at all to errors.
-    Both are labeled so cached bytes never read as a live feed.
+    Both are labeled so cached bytes never read as a live feed. ``tz``
+    overrides the start-time zone (default: the machine's local zone).
     """
     league = data.get("league", {})
     state = parse_draft(data.get("draft", {}))
@@ -87,7 +102,7 @@ def build_summary(
         ),
         (
             f"Draft {state.draft_id}: {status} ({state.draft_type}), "
-            f"{_start_time_label(state)}"
+            f"{_start_time_label(state, tz)}"
         ),
     ]
     if degraded:
