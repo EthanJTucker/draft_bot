@@ -1,5 +1,9 @@
 """The snapshot CLI's league summary."""
 
+# pylint: disable=duplicate-code  # the injectable-CLI invocation pattern
+# (argv + fake transport + fixed clock + StringIO) legitimately mirrors
+# test_trackdemo's; the two CLIs share that seam by design.
+
 from __future__ import annotations
 
 import io
