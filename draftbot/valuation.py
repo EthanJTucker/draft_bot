@@ -170,3 +170,78 @@ class PriceModel:
         if len(band) >= MIN_BAND_SAMPLES:
             return float(statistics.median(band))
         return self.curve_price(position, adp)
+
+
+#: Share of each FLEX slot assumed to go to RB/WR/TE when computing how
+#: many players at a position start league-wide (half-PPR convention).
+FLEX_SPLIT = {"RB": 0.5, "WR": 0.4, "TE": 0.1}
+
+#: Round to this many decimals before ranking/tie-breaking (determinism).
+_QUANTIZE_DECIMALS = 10
+
+
+def _quantize(value: float) -> float:
+    return round(value, _QUANTIZE_DECIMALS)
+
+
+def replacement_ranks(roster_slots: Mapping[str, int], teams: int) -> dict[str, int]:
+    """Positional rank of the replacement-level player: the first player
+    past the league's last starter, counting each position's share of the
+    FLEX slots."""
+    flex_slots = roster_slots.get("FLEX", 0)
+    ranks = {}
+    for position in VALUED_POSITIONS:
+        starters = teams * (
+            roster_slots.get(position, 0) + FLEX_SPLIT.get(position, 0.0) * flex_slots
+        )
+        ranks[position] = math.floor(starters) + 1
+    return ranks
+
+
+def _replacement_points(
+    season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
+) -> dict[str, float]:
+    """Projected points of the replacement-level player per position (0.0
+    when the pool is shallower than the replacement rank)."""
+    replacement = {}
+    for position, rank in sorted(ranks.items()):
+        pool = sorted(
+            (
+                (-_quantize(row.points), row.player_id)
+                for row in season.values()
+                if row.position == position and row.points is not None
+            ),
+        )
+        replacement[position] = -pool[rank - 1][0] if len(pool) >= rank else 0.0
+    return replacement
+
+
+def compute_worths(
+    season: Mapping[str, SeasonRow],
+    roster_slots: Mapping[str, int],
+    teams: int,
+    budget: int,
+) -> dict[str, float]:
+    """Roster-independent worth in auction dollars for every player.
+
+    Each drafted slot costs a $1 minimum bid; the rest of the league's money
+    (teams x (budget - drafted slots), IR excluded because IR spots are not
+    drafted) is spread over projected points above replacement. K/DEF and
+    everyone at or below replacement are $1 roster fillers. Marginal-roster
+    and inflation adjustments belong to later slices, not here.
+    """
+    ranks = replacement_ranks(roster_slots, teams)
+    replacement = _replacement_points(season, ranks)
+    vorp = {
+        row.player_id: _quantize(max(0.0, row.points - replacement[row.position]))
+        for row in season.values()
+        if row.position in VALUED_POSITIONS and row.points is not None
+    }
+    total_vorp = sum(vorp[player_id] for player_id in sorted(vorp))
+    drafted_slots = sum(count for slot, count in roster_slots.items() if slot != "IR")
+    discretionary = teams * (budget - drafted_slots)
+    dollars_per_point = discretionary / total_vorp if total_vorp > 0 else 0.0
+    return {
+        player_id: _quantize(FLOOR_PRICE + vorp.get(player_id, 0.0) * dollars_per_point)
+        for player_id in sorted(season)
+    }

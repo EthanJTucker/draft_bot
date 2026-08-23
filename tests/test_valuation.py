@@ -12,7 +12,14 @@ import math
 import pytest
 
 from draftbot.models import parse_picks
-from draftbot.valuation import Bid, PriceModel, build_bids, parse_projections
+from draftbot.valuation import (
+    Bid,
+    PriceModel,
+    build_bids,
+    compute_worths,
+    parse_projections,
+    replacement_ranks,
+)
 
 
 def _bids(position, pairs):
@@ -211,3 +218,84 @@ class TestCurveFallback:
         """A position with no bid history (K, DEF) has no curve: $1."""
         model = PriceModel(_bids("QB", self.LINE_PAIRS))
         assert model.room_price("K", 30.0) == 1.0
+
+
+class TestWorth:
+    """Projection value over replacement, converted to auction dollars."""
+
+    ROSTER = {
+        "QB": 1,
+        "RB": 2,
+        "WR": 2,
+        "TE": 1,
+        "FLEX": 1,
+        "K": 1,
+        "DEF": 1,
+        "BN": 6,
+        "IR": 2,
+    }
+
+    def test_replacement_ranks_follow_roster_shape_and_flex_split(self):
+        """12 teams, 1QB/2RB/2WR/1TE + FLEX split 0.5/0.4/0.1: replacement
+        is the first player past the last starter at each position."""
+        assert replacement_ranks(self.ROSTER, teams=12) == {
+            "QB": 13,
+            "RB": 31,
+            "WR": 29,
+            "TE": 14,
+        }
+
+    @staticmethod
+    def _tiny_season(points_by_id, position="QB"):
+        rows = [
+            _projection_row(pid, position, None, pts=pts)
+            for pid, pts in points_by_id.items()
+        ]
+        return parse_projections(rows)
+
+    def test_worth_scales_vorp_to_league_discretionary_dollars(self):
+        """2 teams x ($10 budget - 2 drafted slots) = $16 discretionary,
+        spread over 60 points of value over replacement (QB rank 3).
+        Every worth is $1 base plus the player's share — a mean, a sum,
+        or a wrong replacement rank all fail the exact numbers."""
+        season = self._tiny_season({"a": 100.0, "b": 80.0, "c": 60.0, "d": 40.0})
+        worths = compute_worths(
+            season, roster_slots={"QB": 1, "BN": 1}, teams=2, budget=10
+        )
+        assert worths["a"] == pytest.approx(1 + 40 * 16 / 60)
+        assert worths["b"] == pytest.approx(1 + 20 * 16 / 60)
+        assert worths["c"] == 1.0
+        assert worths["d"] == 1.0
+        assert sum(worths.values()) - len(worths) == pytest.approx(16.0)
+
+    def test_ir_slots_are_not_drafted_slots(self):
+        """IR spots cost no auction dollars; counting them shrinks the
+        discretionary pool and fails the exact worth."""
+        season = self._tiny_season({"a": 100.0, "b": 80.0, "c": 60.0})
+        worths = compute_worths(
+            season, roster_slots={"QB": 1, "BN": 1, "IR": 5}, teams=2, budget=10
+        )
+        assert worths["a"] == pytest.approx(1 + 40 * 16 / 60)
+
+    def test_kickers_and_defenses_are_roster_fillers_at_one_dollar(self):
+        """Monster kicker points never earn auction dollars."""
+        rows = [
+            _projection_row("k1", "K", None, pts=999.0),
+            _projection_row("d1", "DEF", None, pts=999.0),
+            _projection_row("q1", "QB", None, pts=100.0),
+            _projection_row("q2", "QB", None, pts=50.0),
+        ]
+        worths = compute_worths(
+            parse_projections(rows), roster_slots={"QB": 1}, teams=1, budget=10
+        )
+        assert worths["k1"] == 1.0
+        assert worths["d1"] == 1.0
+        assert worths["q1"] > 1.0
+
+    def test_flat_pool_prices_everyone_at_the_floor(self):
+        """Zero total value over replacement must not divide by zero."""
+        season = self._tiny_season({"a": 50.0, "b": 50.0, "c": 50.0})
+        worths = compute_worths(
+            season, roster_slots={"QB": 1, "BN": 1}, teams=2, budget=10
+        )
+        assert set(worths.values()) == {1.0}
