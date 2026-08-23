@@ -32,8 +32,7 @@ def parse_pick(raw: dict) -> Pick:
     """Parse one raw pick. The winning bid lives ONLY in ``metadata.amount``
     (a string); any top-level ``amount`` field is not the bid."""
     metadata = raw.get("metadata") or {}
-    raw_amount = metadata.get("amount")
-    amount = int(raw_amount) if raw_amount is not None else None
+    amount = _parse_bid(metadata.get("amount"))
     return Pick(
         player_id=str(raw.get("player_id", "")),
         amount=amount,
@@ -100,6 +99,23 @@ def _to_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_bid(value) -> int | None:
+    """Parse a winning bid that may arrive malformed mid-auction.
+
+    Integer-valued strings parse ("43", and "43.0" only because it is
+    exactly integral); empty or garbage values become None rather than
+    crashing the poll loop.
+    """
+    amount = _to_int(value)
+    if amount is not None:
+        return amount
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else None
 
 
 def parse_draft(raw: dict) -> DraftState:

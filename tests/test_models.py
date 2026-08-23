@@ -47,6 +47,27 @@ def test_pick_without_amount_parses_as_none():
     assert parse_pick(raw).amount is None
 
 
+def test_malformed_bid_strings_parse_as_none_not_crash():
+    """Sleeper metadata values can be empty or garbage strings; a malformed
+    bid must become None mid-auction, never a ValueError."""
+    for bad in ("", "abc", "43.5", "  "):
+        raw = _raw_pick(metadata={"amount": bad})
+        assert parse_pick(raw).amount is None, bad
+
+
+def test_integral_float_bid_string_parses_as_int():
+    """A bid serialized as "43.0" is exactly integral and must parse as 43."""
+    assert parse_pick(_raw_pick(metadata={"amount": "43.0"})).amount == 43
+
+
+def test_pick_with_null_metadata_parses():
+    """The API can serve ``metadata: null``; the pick must still parse."""
+    pick = parse_pick(_raw_pick(metadata=None))
+    assert pick.amount is None
+    assert not pick.metadata
+    assert pick.draft_slot == 5
+
+
 def test_purchases_attribute_by_draft_slot_not_picked_by():
     """Anti-cheat: picked_by deliberately disagrees with draft_slot.
 
@@ -131,6 +152,22 @@ def test_active_draft_timer_expiry_is_a_plain_comparison():
     assert state.paused is False
     assert state.is_timer_expired(now_ms=2_000_000) is True
     assert state.is_timer_expired(now_ms=999_999) is False
+
+
+def test_timer_expires_exactly_at_the_boundary_millisecond():
+    """now_ms == timer_end_at is expired: the timer has run OUT, not almost."""
+    state = parse_draft(_raw_draft())
+    assert state.timer_end_at == 1_000_000
+    assert state.is_timer_expired(now_ms=1_000_000) is True
+
+
+def test_paused_string_false_does_not_read_as_paused():
+    """Sleeper flags are strings: metadata.paused = "false" means NOT paused
+    (a naive bool("false") would pause the draft forever)."""
+    metadata = dict(_raw_draft()["metadata"], paused="false")
+    state = parse_draft(_raw_draft(metadata=metadata))
+    assert state.paused is False
+    assert state.is_timer_expired(now_ms=2_000_000) is True
 
 
 def test_live_auction_metadata_exposed_raw():
