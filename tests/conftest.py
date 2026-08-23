@@ -23,6 +23,22 @@ def config_fixture():
     return load_config(REPO_ROOT / "league_config.toml")
 
 
+def raw_auction_pick(
+    pick_no: int, player_id: str, slot: int, amount: str, position: str = "WR"
+) -> dict:
+    """A minimal realistic raw auction pick: the winning bid is a STRING in
+    ``metadata.amount`` and attribution runs by ``draft_slot``."""
+    return {
+        "round": 1 + (pick_no - 1) // 12,
+        "pick_no": pick_no,
+        "draft_slot": slot,
+        "player_id": player_id,
+        "picked_by": "",
+        "is_keeper": None,
+        "metadata": {"amount": amount, "position": position},
+    }
+
+
 class FakeTransport:
     """Serves canned JSON payloads by URL path suffix; records every request.
 

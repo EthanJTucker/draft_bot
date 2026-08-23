@@ -10,19 +10,7 @@ from __future__ import annotations
 from draftbot.sleeper_client import SleeperClient
 from draftbot.sources import LivePollSource, ReplaySource
 
-from .conftest import FakeTransport
-
-
-def _raw_pick(pick_no: int, player_id: str, slot: int, amount: str) -> dict:
-    return {
-        "round": 1 + (pick_no - 1) // 12,
-        "pick_no": pick_no,
-        "draft_slot": slot,
-        "player_id": player_id,
-        "picked_by": "",
-        "is_keeper": None,
-        "metadata": {"amount": amount, "position": "WR"},
-    }
+from .conftest import FakeTransport, raw_auction_pick
 
 
 def _raw_completed_draft() -> dict:
@@ -46,9 +34,9 @@ def test_replay_reveals_picks_one_per_poll_in_pick_order():
     """The first tick has no sales yet; each poll reveals exactly one pick,
     in pick_no order even when the raw feed arrives shuffled."""
     raw_picks = [
-        _raw_pick(2, "B", 2, "10"),
-        _raw_pick(1, "A", 1, "51"),
-        _raw_pick(3, "C", 1, "7"),
+        raw_auction_pick(2, "B", 2, "10"),
+        raw_auction_pick(1, "A", 1, "51"),
+        raw_auction_pick(3, "C", 1, "7"),
     ]
     source = ReplaySource(_raw_completed_draft(), raw_picks)
 
@@ -66,7 +54,7 @@ def test_replay_mimics_the_stale_nomination_pointer_and_status():
     with the nomination metadata still pointing at the just-sold player.
     After the last sale the draft completes, and further polls repeat the
     finished state (exactly like polling a real completed draft)."""
-    raw_picks = [_raw_pick(1, "A", 1, "51"), _raw_pick(2, "B", 2, "10")]
+    raw_picks = [raw_auction_pick(1, "A", 1, "51"), raw_auction_pick(2, "B", 2, "10")]
     source = ReplaySource(_raw_completed_draft(), raw_picks)
 
     first = source.poll()
@@ -97,7 +85,7 @@ def test_live_poll_reports_staleness_per_endpoint_per_tick(config, tmp_path):
     transport = FakeTransport(
         {
             draft_key: _raw_completed_draft() | {"status": "drafting"},
-            "/picks": [_raw_pick(1, "A", 1, "51")],
+            "/picks": [raw_auction_pick(1, "A", 1, "51")],
         }
     )
     client = SleeperClient(
@@ -131,7 +119,7 @@ def test_live_poll_defaults_to_the_live_draft_and_accepts_historical_ids(
     transport = FakeTransport(
         {
             f"/draft/{historical_id}": _raw_completed_draft(),
-            "/picks": [_raw_pick(1, "A", 1, "51")],
+            "/picks": [raw_auction_pick(1, "A", 1, "51")],
         }
     )
     client = SleeperClient(
