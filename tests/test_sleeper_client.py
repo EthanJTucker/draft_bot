@@ -97,6 +97,93 @@ def test_stale_player_map_survives_endpoint_failure(config, tmp_path):
     assert client.get_players()["4034"]["last_name"] == "Hill"
 
 
+def test_historical_picks_fetch_never_corrupts_the_live_cache(config, tmp_path):
+    """Anti-cheat (issue #3 seam): after fetching a historical draft's
+    picks, a live-endpoint outage must serve the LIVE cache, never last
+    season's picks masquerading as the live feed."""
+    live_picks = [{"player_id": "L", "metadata": {"amount": "10"}}]
+    hist_id = config.historical_draft_ids["2025"]
+    hist_picks = [{"player_id": "H", "metadata": {"amount": "99"}}]
+    transport = FakeTransport(
+        {
+            f"/draft/{config.draft_id}/picks": live_picks,
+            f"/draft/{hist_id}/picks": hist_picks,
+        }
+    )
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    assert client.get_picks() == live_picks
+    assert client.get_picks(draft_id=hist_id) == hist_picks
+
+    transport.failing = True
+
+    fallback = client.get_picks()
+    assert fallback == live_picks
+    assert fallback != hist_picks
+
+
+def test_historical_cache_alone_cannot_serve_as_the_live_fallback(config, tmp_path):
+    """With only a historical fetch cached, a live failure raises instead of
+    silently serving 2025 picks as the 2026 feed."""
+    hist_id = config.historical_draft_ids["2025"]
+    transport = FakeTransport({f"/draft/{hist_id}/picks": [{"player_id": "H"}]})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    client.get_picks(draft_id=hist_id)
+
+    transport.failing = True
+
+    with pytest.raises(SleeperUnavailableError):
+        client.get_picks()
+
+
+def test_draft_and_picks_caches_are_keyed_by_draft_id(config, tmp_path):
+    """Each draft snapshots under its own id on disk."""
+    hist_id = config.historical_draft_ids["2025"]
+    transport = FakeTransport(
+        {
+            f"/draft/{config.draft_id}": {"status": "drafting"},
+            f"/draft/{hist_id}": {"status": "complete"},
+            f"/draft/{config.draft_id}/picks": [],
+            f"/draft/{hist_id}/picks": [],
+        }
+    )
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
+    )
+    assert client.get_draft()["status"] == "drafting"
+    assert client.get_draft(draft_id=hist_id)["status"] == "complete"
+    client.get_picks()
+    client.get_picks(draft_id=hist_id)
+
+    for name in (
+        f"draft_{config.draft_id}",
+        f"draft_{hist_id}",
+        f"picks_{config.draft_id}",
+        f"picks_{hist_id}",
+    ):
+        assert (tmp_path / f"{name}.json").exists(), name
+
+
+def test_clock_rollback_invalidates_player_map_freshness(config, tmp_path):
+    """A wall clock that rolls backward (cache stamped in the future) must
+    refetch rather than trust the future-stamped cache forever."""
+    now = {"t": 1_000_000.0}
+    transport = FakeTransport({"/players/nfl": {"4034": {"last_name": "Hill"}}})
+    client = SleeperClient(
+        config, cache_dir=tmp_path, http_get=transport, clock=lambda: now["t"]
+    )
+    client.get_players()
+    assert len(transport.requests) == 1
+
+    now["t"] -= 3_600  # clock rolled back one hour
+
+    client.get_players()
+    assert len(transport.requests) == 2
+
+
 def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
     """Startup snapshot: every endpoint fetched and persisted in one call."""
     transport = FakeTransport(
@@ -125,8 +212,8 @@ def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
     assert snapshot["projections"][0]["player_id"] == "4034"
     for name in (
         "league",
-        "draft",
-        "picks",
+        f"draft_{config.draft_id}",
+        f"picks_{config.draft_id}",
         "rosters",
         "users",
         "players",

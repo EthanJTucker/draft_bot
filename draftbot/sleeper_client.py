@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import itertools
 import json
+import os
 import time
 from pathlib import Path
 from typing import Callable
@@ -42,6 +43,10 @@ def default_http_get(
 class SleeperClient:
     """Fetches league data and snapshots every payload to the disk cache."""
 
+    # Class-wide counter so two clients constructed in the same millisecond
+    # still get distinct cache-bust prefixes.
+    _instance_ids = itertools.count()
+
     def __init__(
         self,
         config: LeagueConfig,
@@ -57,24 +62,40 @@ class SleeperClient:
             )
         self._http_get = http_get
         self._clock = clock
-        # Monotonic per-request counter, seeded from the clock so restarts
-        # of the process never reuse a recent value.
-        self._cache_bust_counter = itertools.count(int(self._clock() * 1000))
+        # Bust tokens are unique per request (counter), per instance and
+        # process (prefix), and across restarts (clock seed).
+        self._cache_bust_prefix = (
+            f"{int(self._clock() * 1000)}"
+            f"-{os.getpid()}-{next(SleeperClient._instance_ids)}"
+        )
+        self._cache_bust_counter = itertools.count()
 
     def get_league(self) -> dict:
         """The league object."""
         url = f"{API_BASE}/league/{self.config.league_id}"
         return self._fetch_json("league", url)
 
-    def get_draft(self) -> dict:
-        """The draft object (carries live-auction state in ``metadata``)."""
-        url = f"{API_BASE}/draft/{self.config.draft_id}"
-        return self._fetch_json("draft", url)
+    def get_draft(self, draft_id: str | None = None) -> dict:
+        """The draft object (carries live-auction state in ``metadata``).
 
-    def get_picks(self):
-        """The draft's picks feed (completed auction purchases)."""
-        url = f"{API_BASE}/draft/{self.config.draft_id}/picks"
-        return self._fetch_json("picks", url)
+        Defaults to the live draft; pass a historical id (see
+        ``config.historical_draft_ids``) for a prior season. Each draft
+        caches under its own id, so a historical fetch can never overwrite
+        the live draft's fallback cache.
+        """
+        chosen = draft_id if draft_id is not None else self.config.draft_id
+        url = f"{API_BASE}/draft/{chosen}"
+        return self._fetch_json(f"draft_{chosen}", url)
+
+    def get_picks(self, draft_id: str | None = None):
+        """The draft's picks feed (completed auction purchases).
+
+        ``draft_id`` works exactly as in :meth:`get_draft`, with the same
+        per-draft cache isolation.
+        """
+        chosen = draft_id if draft_id is not None else self.config.draft_id
+        url = f"{API_BASE}/draft/{chosen}/picks"
+        return self._fetch_json(f"picks_{chosen}", url)
 
     def get_rosters(self):
         """The league's rosters."""
@@ -134,7 +155,8 @@ class SleeperClient:
         """Append an always-changing query param so Sleeper's CDN cannot
         serve stale bytes (draft is cached s-maxage=30, picks 15)."""
         separator = "&" if "?" in url else "?"
-        return f"{url}{separator}_cb={next(self._cache_bust_counter)}"
+        token = f"{self._cache_bust_prefix}-{next(self._cache_bust_counter)}"
+        return f"{url}{separator}_cb={token}"
 
     def _fetch_json(self, cache_name: str, url: str):
         """Fetch ``url`` and snapshot it to the cache; on a live-endpoint
