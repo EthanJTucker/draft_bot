@@ -245,3 +245,230 @@ def compute_worths(
         player_id: _quantize(FLOOR_PRICE + vorp.get(player_id, 0.0) * dollars_per_point)
         for player_id in sorted(season)
     }
+
+
+#: Multi-year keeper discount per season of delay (decided in GAMEPLAN.md).
+GAMMA = 0.8
+
+#: Room prices under $3 are auction noise; they never form transitions.
+MIN_TRANSITION_PRICE = 3.0
+
+#: A comparable pool must reach this size before the search stops widening.
+MIN_POOL_SIZE = 25
+
+#: The age-matched old-RB pool is scarce; it may stop at this size instead.
+MIN_OLD_RB_POOL_SIZE = 8
+
+#: Price-band ratios for pool widening levels 0, 1, 2.
+POOL_PRICE_BANDS = (1.6, 2.2, 3.0)
+
+#: Under this many two-year samples, OV2 falls back to half of OV1.
+MIN_TWO_YEAR_SAMPLES = 10
+
+#: An RB with this much experience prices off the age-matched pool.
+OLD_RB_EXPERIENCE = 8
+
+#: Positions whose transitions are comparable to each candidate position
+#: before the pool widens to every position (TEs price like thin WRs).
+POSITION_GROUPS = {
+    "QB": frozenset({"QB"}),
+    "RB": frozenset({"RB"}),
+    "WR": frozenset({"WR"}),
+    "TE": frozenset({"TE", "WR"}),
+}
+
+
+def experience_as_of(
+    exp_now: int | None, season: int, current_season: int
+) -> int | None:
+    """As-of-season experience from a current-snapshot ``years_exp``.
+
+    The projections API embeds the CURRENT years_exp even in historical
+    season files (verified live 2026-08-23), so historical buckets must be
+    recomputed: ``exp_t = exp_now - (current_season - t)``, floored at 0.
+    """
+    if exp_now is None:
+        return None
+    return max(0, exp_now - (current_season - season))
+
+
+@dataclass(frozen=True)
+class TransitionSample:
+    """One player's year-over-year price transition.
+
+    ``ratio_one``/``ratio_two`` are next-price and price-after-next over
+    ``price``; ``experience`` is as-of the sample's season, never the
+    snapshot value.
+    """
+
+    position: str
+    experience: int | None
+    price: float
+    ratio_one: float
+    ratio_two: float | None
+
+
+def build_transition_samples(
+    seasons: Mapping[int, Mapping[str, SeasonRow]],
+    price_model: PriceModel,
+    current_season: int,
+) -> list[TransitionSample]:
+    """Price transitions for every player priced at $3+ in a season with a
+    following season on file (2023->24->25, 2024->25->26, 2025->26).
+
+    A player missing from a later file fell off the board and transitions
+    to the $1 floor — dropping him instead would survivorship-bias every
+    ratio upward.
+    """
+
+    def price_in(year: int, player_id: str, position: str) -> float:
+        row = seasons.get(year, {}).get(player_id)
+        return price_model.room_price(position, row.adp if row else None)
+
+    samples = []
+    for year in sorted(seasons):
+        if year + 1 not in seasons:
+            continue
+        has_year_two = year + 2 in seasons
+        for player_id in sorted(seasons[year]):
+            row = seasons[year][player_id]
+            if row.position not in VALUED_POSITIONS:
+                continue
+            price = price_model.room_price(row.position, row.adp)
+            if price < MIN_TRANSITION_PRICE:
+                continue
+            ratio_one = _quantize(price_in(year + 1, player_id, row.position) / price)
+            ratio_two = (
+                _quantize(price_in(year + 2, player_id, row.position) / price)
+                if has_year_two
+                else None
+            )
+            samples.append(
+                TransitionSample(
+                    position=row.position,
+                    experience=experience_as_of(
+                        row.years_exp_snapshot, year, current_season
+                    ),
+                    price=_quantize(price),
+                    ratio_one=ratio_one,
+                    ratio_two=ratio_two,
+                )
+            )
+    return samples
+
+
+@dataclass(frozen=True)
+class KeeperRules:
+    """The league's keeper cost rule: cost = max(price + increment, floor),
+    with at most ``max_consecutive_years`` keeps in a row."""
+
+    cost_increment: int = 2
+    cost_floor: int = 5
+    max_consecutive_years: int = 2
+
+
+@dataclass(frozen=True)
+class OptionValues:
+    """Expected keep-again profits: ``one_year`` is E[max(0, V1 - cost1)],
+    ``two_year`` the year-two term conditioned on the year-one keep being
+    in the money. ``pool_size``/``widen_level`` document the comparable
+    pool that produced them."""
+
+    one_year: float
+    two_year: float
+    pool_size: int
+    widen_level: int
+
+
+class KeeperModel:
+    """Keeper option pricing from the league's own price transitions."""
+
+    def __init__(
+        self,
+        samples: Sequence[TransitionSample],
+        rules: KeeperRules | None = None,
+        gamma: float = GAMMA,
+    ):
+        self._samples = list(samples)
+        self._rules = rules if rules is not None else KeeperRules()
+        self._gamma = gamma
+
+    def keeper_cost(self, price: float) -> float:
+        """Next season's keeper cost for a player bought at ``price``."""
+        return max(price + self._rules.cost_increment, self._rules.cost_floor)
+
+    def comparable_pool(
+        self, position: str, experience: int | None, price: float
+    ) -> tuple[list[TransitionSample], int]:
+        """Transition samples comparable to the candidate, widening the
+        price band (and position match) until the pool is big enough.
+
+        Old RBs (8+ years as of the current season) price off an
+        age-matched pool of 6+ year backs — the raw veteran bucket mixes
+        in mid-career backs whose aging curve they no longer share.
+        """
+        old_rb = position == "RB" and (experience or 0) >= OLD_RB_EXPERIENCE
+        young = (experience or 0) <= 2
+        group = POSITION_GROUPS.get(position, frozenset())
+        min_pool = MIN_OLD_RB_POOL_SIZE if old_rb else MIN_POOL_SIZE
+
+        def matches(sample: TransitionSample, level: int) -> bool:
+            if sample.experience is None:
+                return False
+            if old_rb:
+                floor = 6 if level < 2 else 5
+                comparable = sample.position == "RB" and sample.experience >= floor
+            elif young:
+                comparable = (
+                    sample.position in group or level >= 1
+                ) and sample.experience <= 2
+            else:
+                comparable = (
+                    sample.position in group or level >= 1
+                ) and 3 <= sample.experience <= 8
+            band = POOL_PRICE_BANDS[level]
+            return comparable and price / band <= sample.price <= price * band
+
+        pool: list[TransitionSample] = []
+        for level, _ in enumerate(POOL_PRICE_BANDS):
+            pool = [s for s in self._samples if matches(s, level)]
+            if len(pool) >= min_pool:
+                return pool, level
+        return pool, len(POOL_PRICE_BANDS) - 1
+
+    def option_values(
+        self, position: str, experience: int | None, room_price: float, price: float
+    ) -> OptionValues:
+        """Expected keep-again profits for a candidate worth ``room_price``
+        on the open market and bought (or kept) at ``price``."""
+        cost_one = self.keeper_cost(price)
+        cost_two = self.keeper_cost(cost_one)
+        pool, level = self.comparable_pool(position, experience, room_price)
+        if not pool:
+            return OptionValues(0.0, 0.0, 0, level)
+        one_year = sum(
+            max(0.0, room_price * s.ratio_one - cost_one) for s in pool
+        ) / len(pool)
+        two_year_pool = [s for s in pool if s.ratio_two is not None]
+        if len(two_year_pool) >= MIN_TWO_YEAR_SAMPLES:
+            # Year two happens only on paths where year one was worth
+            # keeping; dividing by the FULL pool bakes that probability in.
+            two_year = sum(
+                max(0.0, room_price * s.ratio_two - cost_two)
+                for s in two_year_pool
+                if room_price * s.ratio_one > cost_one
+            ) / len(two_year_pool)
+        else:
+            two_year = 0.5 * one_year
+        return OptionValues(_quantize(one_year), _quantize(two_year), len(pool), level)
+
+    def premium(self, options: OptionValues, years_already_kept: int = 0) -> float:
+        """Discounted keeper premium: gamma*OV1 + gamma^2*OV2, truncated by
+        the consecutive-keep cap (a player kept twice has no option left)."""
+        keeps_left = self._rules.max_consecutive_years - years_already_kept
+        value = 0.0
+        if keeps_left >= 1:
+            value += self._gamma * options.one_year
+        if keeps_left >= 2:
+            value += self._gamma**2 * options.two_year
+        return _quantize(value)
