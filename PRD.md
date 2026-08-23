@@ -47,6 +47,8 @@ offline fallback.
 20. As the drafter, I want the remaining-player table sortable and filterable by position, so that I can scan my next targets between nominations.
 21. As a returning league member, I want the valuation calibrated to this room's actual 2023-25 bids, so that "room will pay" reflects my friends, not a generic market.
 22. As a keeper-league player, I want draft prices recorded per player, so that next year's keeper costs (price + $2, $5 floor, 2-year cap) compute themselves.
+23. As the drafter, I want a last-of-tier warning on the nominated player, so that I know when a positional cliff justifies exceeding the smooth max bid.
+24. As the drafter, I want a plain BID/PASS verdict beside the max bid with profit shown as price-minus-value, so that the 10-second read needs no arithmetic.
 
 ## Implementation Decisions
 
@@ -79,6 +81,28 @@ offline fallback.
   not code, so next season is a config change.
 - Environment per Ethan's standard: Python 3.11 conda env, FastAPI + uvicorn,
   pytest, black/isort, pylint at 10.00.
+- Research-driven Sleeper-client requirements (see RESEARCH.md, all verified
+  in prior open-source implementations): cache-bust every poll with a changing
+  query param (the CDN serves the draft object at s-maxage=30 and picks at 15,
+  so naive 2s polling silently reads 15-30s stale); guard against the stale
+  nomination pointer (after a sale, the nominated-player field keeps showing
+  the winner until the next lot — cross-check against the sold set with a
+  post-sale grace window); parse bid amounts as strings; attribute purchases
+  by draft slot, not picked-by; honor the pause flag (overnight auto-pause
+  freezes the timer and reads as expired).
+- Settings-differ guard: on connect, diff the live draft's type, teams,
+  budget, slots, and timers against the assumptions the values were computed
+  under, and banner every mismatch (catches late keeper budget entries and
+  commissioner changes).
+- Inflation correctness: exclude off-model sales (players with no value in
+  the sheet) from the inflation ratio while still debiting team budgets; and
+  taper the repricing multiplier away from the $1-5 tail (measured
+  keeper-league inflation concentrates above roughly the 130th player).
+- Tier model: gap-based tiers per position with remaining-in-tier counts and
+  a last-of-tier flag on the nominated player.
+- Dashboard glanceability constraints: BID/PASS verdict line, profit centered
+  at $0, budgets shown as remaining (not spent), positional view as the
+  primary table.
 
 ## Testing Decisions
 
@@ -97,7 +121,13 @@ offline fallback.
   compared against the 180 actual amounts (MAE bound, no systematic drift as
   the pool empties).
 - Sleeper client: cache and degradation behavior under simulated endpoint
-  failure (no live-network assertions in unit tests).
+  failure (no live-network assertions in unit tests); anti-cheat traps for
+  the research-found gotchas — a poll loop that would accept CDN-stale bytes
+  must fail, a nominee already present in the sold set must not render as
+  live, string bid amounts must parse, and a paused draft must not read as
+  an expired timer.
+- Inflation: an off-model sale must not move the inflation ratio; a $1-5
+  tail player's price must not inflate with the top of the board.
 - Prior art: the keeper EV reference script in the repo is the working model
   the valuation tests formalize.
 
@@ -121,5 +151,13 @@ offline fallback.
 - Biggest risk is the two undocumented Sleeper surfaces (projections, live
   nomination metadata); mitigations are the startup cache, degradation to
   documented picks-polling, and replay as offline fallback.
+- Contingency only (v2): a WebSocket sync path (Sleeper's Phoenix draft
+  topic, documented with captured frames in the Rook project) if the Aug 29
+  mock shows polling latency hurting under the 10s timers. Do not build
+  unless the canary says so.
+- RESEARCH.md records the landscape scan: what exists, per-tool verdicts,
+  the deliberate skips (LP re-optimization, WebSocket-first, LLM advice
+  layers, DOM scraping, autobidding), and the confirmed unique ground this
+  plan occupies.
 - GAMEPLAN.md in the repo holds the full decision record, including the
   verified keeper selection (Waddle $12, Hampton $35, McCaffrey $57).

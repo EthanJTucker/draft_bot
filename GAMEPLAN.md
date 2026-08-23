@@ -143,3 +143,14 @@ lags on draft day. Mitigation: cache all values at startup (dashboard still
 prices everyone), degrade to documented picks-polling (budgets and rosters
 stay exact; nomination view goes manual), `replay.py` is the offline
 fallback. The Aug 29 mock draft is the canary.
+
+## Research addendum (2026-08-23)
+
+Deep landscape scan (RESEARCH.md): nothing public combines live Sleeper
+auction sync with keeper economics, league-history pricing, or a backtest —
+the plan's differentiators are confirmed unbuilt. Folded into the PRD for v1:
+CDN cache-busting on every poll (without it 2s polling reads 15-30s stale),
+stale-nomination guard, string amounts / draft-slot attribution / pause flag,
+settings-differ banner, off-model sales excluded from inflation, tail-tapered
+inflation, tier-depletion flag, and BID/PASS glanceability rules. WebSocket
+sync noted as v2 contingency only.
