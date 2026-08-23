@@ -104,7 +104,7 @@ def test_summary_reports_auction_spend_by_slot(config):
     assert "drafting" in out
 
 
-def test_main_snapshots_and_prints_summary(tmp_path):
+def test_main_snapshots_and_prints_summary(config, tmp_path):
     """The CLI fetches everything, caches to disk, and prints the summary."""
     data = _snapshot_data()
     transport = FakeTransport(
@@ -113,9 +113,9 @@ def test_main_snapshots_and_prints_summary(tmp_path):
             "/rosters": data["rosters"],
             "/users": data["users"],
             "/players/nfl": data["players"],
-            "projections/nfl/2026": data["projections"],
-            "/draft/": data["draft"],
-            "/league/": data["league"],
+            "/projections/nfl/2026": data["projections"],
+            f"/draft/{config.draft_id}": data["draft"],
+            f"/league/{config.league_id}": data["league"],
         }
     )
     out = io.StringIO()

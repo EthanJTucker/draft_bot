@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -23,7 +24,11 @@ def config_fixture():
 
 
 class FakeTransport:
-    """Serves canned JSON payloads by URL prefix and records every request."""
+    """Serves canned JSON payloads by URL path suffix; records every request.
+
+    Keys are path suffixes (query string ignored), so ``/picks`` matches the
+    picks feed but never the draft object, and insertion order is irrelevant.
+    """
 
     # pylint: disable=too-few-public-methods  # a fake transport: __call__ is
     # its entire interface, matching the http_get callable seam.
@@ -37,8 +42,8 @@ class FakeTransport:
         self.requests.append(url)
         if self.failing:
             raise ConnectionError(f"simulated endpoint failure for {url}")
-        base = url.split("?", 1)[0]
-        for prefix, payload in self.payloads.items():
-            if base.startswith(prefix) or prefix in base:
+        path = urlsplit(url).path
+        for suffix, payload in self.payloads.items():
+            if path.endswith(suffix):
                 return json.dumps(payload).encode("utf-8")
         raise ConnectionError(f"no canned payload for {url}")

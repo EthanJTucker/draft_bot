@@ -14,7 +14,7 @@ from .conftest import FakeTransport
 def test_get_league_fetches_and_snapshots_to_disk(config, tmp_path):
     """A fetch returns parsed JSON and leaves a cache file on disk."""
     league_payload = {"league_id": config.league_id, "name": "12th Week Campers"}
-    transport = FakeTransport({"/league/": league_payload})
+    transport = FakeTransport({f"/league/{config.league_id}": league_payload})
     client = SleeperClient(
         config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
     )
@@ -29,7 +29,7 @@ def test_get_league_fetches_and_snapshots_to_disk(config, tmp_path):
 def test_endpoint_failure_serves_cached_copy(config, tmp_path):
     """Simulated endpoint failure: the client falls back to the disk cache."""
     payload = {"league_id": config.league_id, "name": "12th Week Campers"}
-    transport = FakeTransport({"/league/": payload})
+    transport = FakeTransport({f"/league/{config.league_id}": payload})
     client = SleeperClient(
         config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
     )
@@ -96,16 +96,15 @@ def test_stale_player_map_survives_endpoint_failure(config, tmp_path):
 
 def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
     """Startup snapshot: every endpoint fetched and persisted in one call."""
-    # Most-specific keys first: FakeTransport matches in insertion order.
     transport = FakeTransport(
         {
             "/picks": [{"player_id": "4034"}],
             "/rosters": [{"roster_id": 7}],
             "/users": [{"user_id": config.my_user_id}],
             "/players/nfl": {"4034": {"last_name": "Hill"}},
-            "projections/nfl/2026": [{"player_id": "4034", "stats": {}}],
-            "/draft/": {"status": "pre_draft"},
-            "/league/": {"name": "12th Week Campers"},
+            "/projections/nfl/2026": [{"player_id": "4034", "stats": {}}],
+            f"/draft/{config.draft_id}": {"status": "pre_draft"},
+            f"/league/{config.league_id}": {"name": "12th Week Campers"},
         }
     )
     client = SleeperClient(
@@ -135,7 +134,7 @@ def test_snapshot_all_writes_every_endpoint_to_disk(config, tmp_path):
 
 def test_projections_url_uses_com_host_with_positions(config, tmp_path):
     """Projections live on api.sleeper.com (not .app) with position params."""
-    transport = FakeTransport({"projections/nfl/2026": []})
+    transport = FakeTransport({"/projections/nfl/2026": []})
     client = SleeperClient(
         config, cache_dir=tmp_path, http_get=transport, clock=lambda: 1_000.0
     )
