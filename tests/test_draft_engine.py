@@ -12,9 +12,12 @@ from __future__ import annotations
 import pytest
 
 from draftbot.draft_engine import (
+    MARGIN_BASE,
     build_tiers,
+    inflation_adjusted_price,
     marginal_lineup_worth,
     positional_inflation,
+    spend_schedule,
     taper_weight,
     tier_status,
 )
@@ -227,6 +230,80 @@ class TestMarginalNeed:
         assert (
             marginal_lineup_worth("qb15", ["ghost"], self._rows(), _SLOTS) == 15.0
         )
+
+
+class TestInflationAdjustedPrice:
+    """The multiplier's application, floor-safe and tapered."""
+
+    def test_top_of_board_inflates_above_the_floor(self):
+        row = sheet_row(2, "rb2", "RB", 30.0)
+        assert inflation_adjusted_price(row, 1.5) == pytest.approx(1 + 29 * 1.5)
+
+    def test_tail_price_does_not_inflate_with_the_top(self):
+        """Acceptance: a \\$4 player at rank 160 keeps his \\$4 price no
+        matter how hot his position's top of the board runs."""
+        tail = sheet_row(160, "rbtail", "RB", 4.0)
+        assert inflation_adjusted_price(tail, 1.5) == 4.0
+        assert inflation_adjusted_price(tail, 0.5) == 4.0
+
+    def test_keeper_premium_rides_through_uninflated(self):
+        """The premium is next season's money: it neither inflates nor
+        deflates with this room's remaining dollars."""
+        row = sheet_row(2, "rb2", "RB", 30.0, premium=6.0)
+        assert inflation_adjusted_price(row, 1.5) == pytest.approx(1 + 29 * 1.5 + 6)
+        assert inflation_adjusted_price(row, 0.5) == pytest.approx(1 + 29 * 0.5 + 6)
+
+
+class TestSpendSchedule:
+    """Bargain early, spend down late, burn what the pool cannot absorb."""
+
+    def test_par_money_bargains_early(self):
+        """At money parity the margin sits below 1 (the deliberate early
+        bargain stance) and a deep pool leaves no surplus to burn."""
+        margin, boost = spend_schedule(
+            _par_board(), 1, _inflation_rows(), {"RB": 1.0, "WR": 1.0}
+        )
+        assert margin == pytest.approx(MARGIN_BASE)
+        assert margin < 1.0
+        assert boost == 0.0
+
+    def test_relative_riches_raise_the_margin_past_value(self):
+        """Anti-cheat for the timid mutant: my \\$150 against the room's
+        \\$30 must push the margin well above 1, uncapped by anything but
+        my own max bid downstream."""
+        board = make_board({1: 150, 2: 30}, drafted_slots=6)
+        margin, _ = spend_schedule(board, 1, _inflation_rows(), {"RB": 1.0, "WR": 1.0})
+        assert margin == pytest.approx(0.93 + 0.5 * (25 / 5 - 1))
+        assert margin > 2.5
+
+    def test_unspendable_surplus_becomes_a_per_slot_boost(self):
+        """Two open slots, \\$50 left, and the whole remaining pool prices
+        at \\$13: \\$39 of my money is literally unspendable on value, so
+        \\$19.50 per open slot gets added to every bid to burn it."""
+        rows = [
+            sheet_row(1, "a", "RB", 6.0),
+            sheet_row(2, "b", "RB", 5.0),
+            sheet_row(3, "c", "RB", 2.0),
+        ]
+        board = make_board({1: 50, 2: 10}, drafted_slots=2)
+        _, boost = spend_schedule(board, 1, rows, {"RB": 1.0})
+        assert boost == pytest.approx((50 - 11) / 2)
+
+    def test_sold_players_leave_the_opportunity_pool(self):
+        """The surplus check prices only what is still buyable."""
+        rows = [
+            sheet_row(1, "a", "RB", 6.0),
+            sheet_row(2, "b", "RB", 5.0),
+            sheet_row(3, "c", "RB", 2.0),
+        ]
+        board = make_board({1: 50, 2: 10}, [Sale("a", 6, 2)], drafted_slots=2)
+        _, boost = spend_schedule(board, 1, rows, {"RB": 1.0})
+        # Top-2 remaining: b ($5) and c ($2); surplus (50-7)/2.
+        assert boost == pytest.approx((50 - 7) / 2)
+
+    def test_full_roster_has_no_schedule(self):
+        board = make_board({1: 5, 2: 30}, drafted_slots=0)
+        assert spend_schedule(board, 1, _inflation_rows(), {}) == (0.0, 0.0)
 
 
 class TestTaperWeight:

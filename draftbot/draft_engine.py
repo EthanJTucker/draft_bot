@@ -44,6 +44,19 @@ TAPER_ZERO_RANK = 150
 INFLATION_MIN = 0.25
 INFLATION_MAX = 3.0
 
+#: The spend-down margin at money parity: max bids deliberately start
+#: this fraction of the way to value (bargain early)...
+MARGIN_BASE = 0.93
+
+#: ...and rise this much for every unit my money-per-open-slot climbs
+#: past the room's (spend down late). No upper clamp: late-draft riches
+#: must be spendable, and the team max bid already caps every number.
+MARGIN_SLOPE = 0.5
+
+#: The margin never drops below this: a broke stack still bids near value
+#: on the players it actually needs.
+MARGIN_MIN = 0.85
+
 #: A tier break needs a value gap of at least this many dollars...
 TIER_ABS_GAP = 2.0
 
@@ -150,6 +163,62 @@ def positional_inflation(
         ratio = (budgeted - spent.get(position, 0.0)) / left
         inflation[position] = _quantize(max(INFLATION_MIN, min(INFLATION_MAX, ratio)))
     return inflation
+
+
+def inflation_adjusted_price(row: SheetRow, inflation: float) -> float:
+    """One row's price under its position's inflation ratio: the $1 floor
+    never scales, the worth above it scales by the taper-weighted ratio
+    (so the $1-5 tail holds its price whatever the top of the board
+    does), and the keeper premium — next season's money — rides through
+    untouched in both directions."""
+    discretionary = max(0.0, row.worth - FLOOR_PRICE)
+    scaled = discretionary * (1.0 + taper_weight(row.rank) * (inflation - 1.0))
+    return _quantize(FLOOR_PRICE + scaled + row.keeper_premium)
+
+
+def spend_schedule(
+    board: BoardState,
+    my_slot: int,
+    rows: Sequence[SheetRow],
+    inflation: Mapping[str, float],
+    keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
+) -> tuple[float, float]:
+    """The (margin, boost) pair of the bargain-early/spend-down-late
+    schedule.
+
+    The margin multiplies every bid: ``MARGIN_BASE`` at money parity,
+    rising by ``MARGIN_SLOPE`` per unit of my money-per-open-slot over
+    the rest of the room's, floored at ``MARGIN_MIN``. The boost is the
+    money the remaining pool can no longer absorb — my remaining dollars
+    minus the top ``open_slots`` remaining inflation-adjusted prices —
+    spread over my open slots and added to every bid, so a surplus gets
+    burned instead of stranded. A full roster returns (0, 0).
+    """
+    me = board.team(my_slot)
+    if me.open_slots <= 0:
+        return (0.0, 0.0)
+    others = [team for team in board.teams if team.slot != my_slot]
+    others_open = sum(team.open_slots for team in others)
+    my_rate = me.remaining / me.open_slots
+    pool_rate = 1.0
+    if others_open > 0:
+        pool_rate = max(1.0, sum(team.remaining for team in others) / others_open)
+    margin = max(MARGIN_MIN, MARGIN_BASE + MARGIN_SLOPE * (my_rate / pool_rate - 1.0))
+
+    unavailable = {sale.player_id for sale in board.sales} | _keeper_ids(
+        keepers_by_slot
+    )
+    prices = sorted(
+        (
+            -inflation_adjusted_price(row, inflation.get(row.position, 1.0)),
+            row.player_id,
+        )
+        for row in rows
+        if row.player_id not in unavailable
+    )
+    opportunity = sum(-price for price, _ in prices[: me.open_slots])
+    boost = max(0.0, (me.remaining - opportunity) / me.open_slots)
+    return (_quantize(margin), _quantize(boost))
 
 
 def best_lineup_worth(
