@@ -8,7 +8,9 @@ as a STRING in ``metadata.amount``, purchases attribute by ``draft_slot``
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 
 @dataclass(frozen=True)
@@ -25,7 +27,13 @@ class Pick:
     pick_no: int
     is_keeper: bool
     picked_by: str
-    metadata: dict = field(default_factory=dict)
+    metadata: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        # frozen=True alone leaves the metadata dict mutable, and sources
+        # share Pick objects across ticks; a read-only proxy over a private
+        # copy makes mutation raise instead of poisoning later ticks.
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
 def parse_pick(raw: dict) -> Pick:
@@ -62,11 +70,20 @@ class DraftState:
     nominated_player_id: str | None
     highest_offer: str | None
     offering_user_id: str | None
+    # Two different teams on the wire: ``nominating_slot`` is the slot that
+    # NOMINATED the player; ``offering_slot`` is the current HIGH BIDDER's.
     nominating_slot: str | None
-    budget_by_slot: dict[int, int]
-    slot_to_roster_id: dict[int, int]
-    settings: dict = field(default_factory=dict)
-    metadata: dict = field(default_factory=dict)
+    offering_slot: str | None
+    budget_by_slot: Mapping[int, int]
+    slot_to_roster_id: Mapping[int, int]
+    settings: Mapping = field(default_factory=dict)
+    metadata: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Same reasoning as Pick: sources share DraftState objects across
+        # ticks, so the mapping members must refuse writes.
+        for name in ("budget_by_slot", "slot_to_roster_id", "settings", "metadata"):
+            object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
     def is_timer_expired(self, now_ms: int) -> bool:
         """Whether the bid/nomination timer has run out.
@@ -91,14 +108,28 @@ def _is_truthy_flag(value) -> bool:
     return bool(value)
 
 
-def _to_int(value) -> int | None:
-    """Best-effort int conversion for values Sleeper serves as strings."""
+def to_int(value) -> int | None:
+    """Best-effort int conversion for values Sleeper serves as strings.
+
+    Public: the tracker uses it to normalize numeric metadata and settings
+    values before comparing them.
+    """
     if value is None:
         return None
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_optional_str(value) -> str | None:
+    """Coerce an id-ish metadata value to str; None stays None.
+
+    Sleeper serves these fields as strings, but a non-string id slipping
+    through would silently defeat sold-set membership (``4034 != "4034"``),
+    so the coercion is defensive, mirroring ``Pick.player_id``.
+    """
+    return None if value is None else str(value)
 
 
 def _parse_bid(value) -> int | None:
@@ -109,7 +140,7 @@ def _parse_bid(value) -> int | None:
     crashing the poll loop. Negative values are garbage too: "-5" flowing
     into a team's spend would silently credit its budget.
     """
-    amount = _to_int(value)
+    amount = to_int(value)
     if amount is None:
         try:
             number = float(value)
@@ -129,8 +160,8 @@ def parse_draft(raw: dict) -> DraftState:
     budget_by_slot = {}
     for key, value in settings.items():
         if key.startswith("budget_"):
-            slot = _to_int(key.removeprefix("budget_"))
-            budget = _to_int(value)
+            slot = to_int(key.removeprefix("budget_"))
+            budget = to_int(value)
             if slot is not None and budget is not None:
                 budget_by_slot[slot] = budget
     slot_to_roster_id = {
@@ -142,13 +173,14 @@ def parse_draft(raw: dict) -> DraftState:
         draft_id=str(raw.get("draft_id", "")),
         status=str(raw.get("status", "")),
         draft_type=str(raw.get("type", "")),
-        start_time=_to_int(raw.get("start_time")),
+        start_time=to_int(raw.get("start_time")),
         paused=paused,
-        timer_end_at=_to_int(metadata.get("timer_end_at")),
-        nominated_player_id=metadata.get("nominated_player_id"),
-        highest_offer=metadata.get("highest_offer"),
-        offering_user_id=metadata.get("offering_user_id"),
-        nominating_slot=metadata.get("nominating_slot"),
+        timer_end_at=to_int(metadata.get("timer_end_at")),
+        nominated_player_id=_to_optional_str(metadata.get("nominated_player_id")),
+        highest_offer=_to_optional_str(metadata.get("highest_offer")),
+        offering_user_id=_to_optional_str(metadata.get("offering_user_id")),
+        nominating_slot=_to_optional_str(metadata.get("nominating_slot")),
+        offering_slot=_to_optional_str(metadata.get("offering_slot")),
         budget_by_slot=budget_by_slot,
         slot_to_roster_id=slot_to_roster_id,
         settings=settings,

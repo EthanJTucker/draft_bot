@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from draftbot.config import LeagueConfig
-from draftbot.models import DraftState, _to_int
+from draftbot.models import DraftState, to_int
 from draftbot.sources import SourceTick
 
 # The nomination pointer legitimately keeps naming the just-sold winner for
@@ -130,8 +130,8 @@ def diff_settings(
     mismatches = []
     for field, want in expected.items():
         got = draft.draft_type if field == "type" else draft.settings.get(field)
-        if _to_int(want) is not None and _to_int(got) is not None:
-            equal = _to_int(want) == _to_int(got)
+        if to_int(want) is not None and to_int(got) is not None:
+            equal = to_int(want) == to_int(got)
         else:
             equal = want == got
         if not equal:
@@ -248,8 +248,8 @@ class DraftTracker:
         nominee = draft.nominated_player_id
         if not nominee:
             return NominationView(None, False, NOMINATION_NONE)
-        offer = _to_int(draft.highest_offer)
-        slot = _to_int(draft.nominating_slot)
+        offer = to_int(draft.highest_offer)
+        slot = to_int(draft.nominating_slot)
         if nominee in sold:
             in_grace = (
                 self._last_sale_at is not None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from draftbot.models import parse_draft, parse_pick, parse_picks, spent_by_slot
 
 
@@ -126,6 +128,7 @@ def _raw_draft(**overrides):
             "highest_offer": "23",
             "offering_user_id": "111111111111111111",
             "nominating_slot": "5",
+            "offering_slot": "2",
             "timer_end_at": "1000000",
         },
         "settings": {"budget": 200, "teams": 12},
@@ -179,12 +182,65 @@ def test_paused_string_false_does_not_read_as_paused():
 
 
 def test_live_auction_metadata_exposed_raw():
-    """Live-auction fields pass through unparsed (interpretation is issue 4)."""
+    """Live-auction fields pass through unparsed (interpretation is issue 4).
+
+    ``nominating_slot`` is the NOMINATOR's slot and ``offering_slot`` the
+    current HIGH BIDDER's slot — two different teams on the real wire.
+    """
     state = parse_draft(_raw_draft())
     assert state.nominated_player_id == "4034"
     assert state.highest_offer == "23"
     assert state.offering_user_id == "111111111111111111"
     assert state.nominating_slot == "5"
+    assert state.offering_slot == "2"
+
+
+def test_id_like_metadata_fields_coerce_to_str_and_none_stays_none():
+    """Anti-cheat: Sleeper serves these as strings, but a non-string id
+    would silently defeat sold-set membership (``"4034" != 4034``). Every
+    id-ish metadata field coerces to str; absent fields stay None."""
+    coerced = parse_draft(
+        _raw_draft(
+            metadata={
+                "nominated_player_id": 4034,
+                "highest_offer": 23,
+                "offering_user_id": 111111111111111111,
+                "nominating_slot": 5,
+                "offering_slot": 2,
+            }
+        )
+    )
+    assert coerced.nominated_player_id == "4034"
+    assert coerced.highest_offer == "23"
+    assert coerced.offering_user_id == "111111111111111111"
+    assert coerced.nominating_slot == "5"
+    assert coerced.offering_slot == "2"
+
+    absent = parse_draft(_raw_draft(metadata={}))
+    assert absent.nominated_player_id is None
+    assert absent.highest_offer is None
+    assert absent.offering_user_id is None
+    assert absent.nominating_slot is None
+    assert absent.offering_slot is None
+
+
+def test_parsed_models_are_genuinely_read_only():
+    """frozen=True alone leaves the dict members mutable; sources share
+    parsed objects across ticks, so a consumer mutating one would poison
+    every later tick. The mappings must refuse writes outright."""
+    pick = parse_pick(_raw_pick())
+    with pytest.raises(TypeError):
+        pick.metadata["amount"] = "999"  # type: ignore[index]
+
+    state = parse_draft(_raw_draft(settings={"budget": 200, "budget_1": 143}))
+    with pytest.raises(TypeError):
+        state.budget_by_slot[1] = 0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        state.slot_to_roster_id[1] = 99  # type: ignore[index]
+    with pytest.raises(TypeError):
+        state.settings["budget"] = 0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        state.metadata["nominated_player_id"] = "X"  # type: ignore[index]
 
 
 def test_budget_by_slot_parses_settings_budget_n():
