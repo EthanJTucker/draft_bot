@@ -4,8 +4,9 @@ Live auction assistant for a 12-team Sleeper keeper league. Built so far: a
 read-only Sleeper API client with an on-disk cache, clean parsed types for
 picks and draft state, a snapshot CLI, the static value sheet (room prices,
 projection worth, keeper NPV), and live draft tracking with a replay demo.
-The backtest report and the dashboard are the later slices. The decision
-record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
+The backtest report and the dashboard are built too, and the override
+file, nomination suggestions, and the dry run are the later slices. The
+decision record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
 
 ## Setup
 
@@ -178,12 +179,14 @@ price, an early/mid/late drift comparison, the off-model (K/DEF)
 exclusions, and the measured-first bounds the pytest gate asserts. The
 sheet is honest - room prices fit on the 2023-2024 bids only, applied to
 2025 preseason ADP - and the suite regenerates the report byte-for-byte,
-so the committed copy can never drift from the code. The replay is also
-the dashboard's offline data source: build the sheet with
-`draftbot.backtest.build_history_price_sheet`, then drive `ReplaySource`
-through `DraftTracker` and price each nominee with `analyze_player` on
-the pre-sale board, exactly as `draftbot.backtest.replay_records` does
-(its docstring is the reference). Options: `--config`, `--history`,
+so the committed copy can never drift from the code. The backtest and
+the dashboard's `--replay` mode drive the same chain - `ReplaySource`
+through `DraftTracker`, each nominee priced with `analyze_player` on the
+pre-sale board (`draftbot.backtest.replay_records` is the reference) -
+but each builds its own sheet: the backtest fits the honest history
+sheet with `draftbot.backtest.build_history_price_sheet`, while the
+dashboard derives its demo sheet from the replay's own hammer prices
+unless `--sheet` supplies a real one. Options: `--config`, `--history`,
 `--draft`, `--season`, `--out`.
 
 ## Dashboard
