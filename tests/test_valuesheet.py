@@ -55,20 +55,43 @@ def _proj(player_id, position, adp, pts, years_exp=1):
     )
 
 
-def _pick(player_id, position, amount):
+def _pick(player_id, position, amount, slot=1):
     """One canned picks-feed entry (string amount, like the live API)."""
     return {
         "player_id": player_id,
-        "draft_slot": 1,
+        "draft_slot": slot,
         "metadata": {"amount": str(amount), "position": position},
     }
 
 
+def _draft(draft_id):
+    """One canned draft object (six slots owned by rosters 1-6)."""
+    return {
+        "draft_id": draft_id,
+        "status": "complete",
+        "type": "auction",
+        "settings": {},
+        "metadata": {},
+        "slot_to_roster_id": {str(slot): slot for slot in range(1, 7)},
+    }
+
+
 def _payloads():
-    """A tiny but complete world: 6 RB bids at ADP 10 pin room(RB,10)=$10;
-    the 2026 pool ranks qb1 > qb2 > rb1 > rb2 > qb3/rb3 by worth."""
+    """A tiny but complete world: six 2023 RB bids ($5 x3, $15 x3, all ADP
+    10) pin room(RB, 10) at the $10 band median, and the 2026 pool ranks
+    qb1 > qb2 > rb1 > rb2 > qb3/rb3 by worth.
+
+    The 2024 feed carries ONE row: h0's owner (roster 1 both years) holds
+    him at exactly max(5+2, 5) = $7 — an unflagged keeper entry, exactly
+    as verified in the league's real 2025 feed. Counted as a bid it would
+    drag the band median from $10 to $7, so the assertion on rb1's room
+    price fails any implementation that skips keeper detection.
+    """
+    amounts = [5, 5, 5, 15, 15, 15]
     proj_2023 = [_proj(f"h{i}", "RB", 10.0, 100.0, years_exp=1) for i in range(6)]
-    picks_2023 = [_pick(f"h{i}", "RB", 10) for i in range(6)]
+    picks_2023 = [_pick(f"h{i}", "RB", amounts[i], slot=i + 1) for i in range(6)]
+    proj_2024 = [_proj("h0", "RB", 10.0, None, years_exp=1)]
+    picks_2024 = [_pick("h0", "RB", 7, slot=1)]
     proj_2026 = [
         _proj("qb1", "QB", 40.0, 300.0),
         _proj("qb2", "QB", 60.0, 200.0),
@@ -79,10 +102,13 @@ def _payloads():
     ]
     return {
         "/draft/D23/picks": picks_2023,
-        "/draft/D24/picks": [],
+        "/draft/D24/picks": picks_2024,
         "/draft/D25/picks": [],
+        "/draft/D23": _draft("D23"),
+        "/draft/D24": _draft("D24"),
+        "/draft/D25": _draft("D25"),
         "/projections/nfl/2023": proj_2023,
-        "/projections/nfl/2024": [],
+        "/projections/nfl/2024": proj_2024,
         "/projections/nfl/2025": [],
         "/projections/nfl/2026": proj_2026,
     }

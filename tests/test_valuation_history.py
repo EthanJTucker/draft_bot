@@ -23,6 +23,7 @@ from draftbot.valuation import (
     PriceModel,
     build_bids,
     build_transition_samples,
+    detect_keeper_picks,
     parse_projections,
 )
 
@@ -67,10 +68,10 @@ def _rebuild_picks(fixture):
             [
                 {
                     "player_id": player_id,
-                    "draft_slot": 1,
+                    "draft_slot": slot,
                     "metadata": {"amount": str(amount), "position": position},
                 }
-                for player_id, position, amount in feed
+                for player_id, position, amount, slot in feed
             ]
         )
         for year, feed in fixture["picks"].items()
@@ -79,17 +80,26 @@ def _rebuild_picks(fixture):
 
 @pytest.fixture(scope="module", name="history")
 def history_fixture():
-    """The full valuation pipeline run once over the committed excerpt."""
+    """The full valuation pipeline run once over the committed excerpt,
+    through the production path: unflagged keeper rows detected from the
+    drafts' slot-to-roster maps and excluded from the fit."""
     fixture = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     seasons = _rebuild_seasons(fixture)
     picks = _rebuild_picks(fixture)
-    bids = build_bids(picks, seasons)
+    slot_maps = {
+        int(year): {int(slot): roster for slot, roster in mapping.items()}
+        for year, mapping in fixture["slot_to_roster_id"].items()
+    }
+    keeper_rows = detect_keeper_picks(picks, slot_maps)
+    bids = build_bids(picks, seasons, exclude=keeper_rows)
     prices = PriceModel(bids)
     samples = build_transition_samples(
         seasons, prices, current_season=fixture["current_season"]
     )
     return SimpleNamespace(
         seasons=seasons,
+        picks=picks,
+        keeper_rows=keeper_rows,
         bids=bids,
         prices=prices,
         samples=samples,
@@ -110,6 +120,18 @@ class TestBidHistory:
         for bid in history.bids:
             by_position[bid.position] = by_position.get(bid.position, 0) + 1
         assert by_position == {"QB": 59, "RB": 151, "WR": 175, "TE": 49}
+
+    def test_the_one_unflagged_keeper_row_is_found_and_harmless(self, history):
+        """The real feeds hide exactly one unflagged keeper: the 2025
+        Eagles DEF, held by its 2024 roster at max($1+$2, $5)=$5 — its $5
+        double-count even explains most of that team's apparent $8
+        leftover. Detection must find it and NOTHING else, although the
+        feeds also contain chain-price sales to different owners (Shakir
+        $2->$5) and same-owner market re-auctions (Metcalf $25->$38).
+        Being a DEF it never entered the four-position fit, so the
+        434-bid pool is identical with or without exclusion."""
+        assert history.keeper_rows == {(2025, "PHI")}
+        assert len(build_bids(history.picks, history.seasons)) == 434
 
 
 class TestVerifiedSpotChecks:

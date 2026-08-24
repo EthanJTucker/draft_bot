@@ -14,6 +14,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from draftbot.config import LeagueConfig
@@ -89,12 +90,17 @@ class Bid:
 def build_bids(
     picks_by_year: Mapping[int, Sequence[Pick]],
     seasons: Mapping[int, Mapping[str, SeasonRow]],
+    exclude: AbstractSet[tuple[int, str]] = frozenset(),
 ) -> list[Bid]:
     """Winning bids from the historical picks feeds, each tagged with the
     DRAFT season's ADP (never a merged or current ADP map).
 
-    Bids are droppable only for the reference model's reasons: K/DEF picks,
-    picks with no parsed amount, and players with no ADP that season.
+    Bids are droppable only for the reference model's reasons — K/DEF
+    picks, picks with no parsed amount, players with no ADP that season —
+    plus keeper rows: picks flagged ``is_keeper`` and any ``(year,
+    player_id)`` in ``exclude`` (see :func:`detect_keeper_picks`). A
+    keeper's cost is last season's price plus the increment, not a
+    market-clearing bid, so it must never shape the price fit.
     """
     bids = []
     for year in sorted(picks_by_year):
@@ -103,11 +109,58 @@ def build_bids(
             position = (pick.metadata or {}).get("position")
             if position not in VALUED_POSITIONS or pick.amount is None:
                 continue
+            if pick.is_keeper or (year, pick.player_id) in exclude:
+                continue
             row = season.get(pick.player_id)
             if row is None or not _valid_adp(row.adp):
                 continue
             bids.append(Bid(position=position, adp=row.adp, amount=pick.amount))
     return bids
+
+
+def detect_keeper_picks(
+    picks_by_year: Mapping[int, Sequence[Pick]],
+    slot_to_roster_by_year: Mapping[int, Mapping[int, int]],
+    rules: KeeperRules | None = None,
+) -> set[tuple[int, str]]:
+    """Unflagged keeper rows hiding in the picks feeds, as (year, player_id).
+
+    The league's feeds can carry a keeper entered as an ordinary priced
+    pick with ``is_keeper`` unset (verified in the real 2025 feed). The
+    keeper signature is exact: the SAME roster holds the player in
+    consecutive seasons at precisely ``max(prior price + increment,
+    floor)``. Both conditions are required — draft slots shuffle between
+    years (slot equality is not owner equality), and the league's feeds
+    contain both same-slot chain-price sales to different owners and
+    same-owner re-auctions at market prices, none of which are keepers.
+    """
+    rules = rules if rules is not None else KeeperRules()
+    detected = set()
+    for year in sorted(picks_by_year):
+        if year + 1 not in picks_by_year:
+            continue
+        prior = {
+            pick.player_id: (
+                pick.amount,
+                slot_to_roster_by_year.get(year, {}).get(pick.draft_slot),
+            )
+            for pick in picks_by_year[year]
+            if pick.amount is not None
+        }
+        rosters = slot_to_roster_by_year.get(year + 1, {})
+        for pick in picks_by_year[year + 1]:
+            if pick.amount is None or pick.player_id not in prior:
+                continue
+            prior_amount, prior_roster = prior[pick.player_id]
+            roster = rosters.get(pick.draft_slot)
+            chain_cost = max(prior_amount + rules.cost_increment, rules.cost_floor)
+            if (
+                prior_roster is not None
+                and prior_roster == roster
+                and pick.amount == chain_cost
+            ):
+                detected.add((year + 1, pick.player_id))
+    return detected
 
 
 def _fit_log_curve(bids: Sequence[Bid]) -> tuple[float, float] | None:
@@ -522,10 +575,36 @@ def _keeper_premium(keeper: KeeperModel, row: SeasonRow, room_price: float) -> f
     return keeper.premium(options)
 
 
+def _fit_models(
+    seasons: Mapping[int, Mapping[str, SeasonRow]],
+    picks_by_year: Mapping[int, Sequence[Pick]],
+    config: LeagueConfig,
+    slot_to_roster_by_year: Mapping[int, Mapping[int, int]] | None,
+) -> tuple[PriceModel, KeeperModel]:
+    """The fitted price and keeper models behind one value sheet, with
+    keeper rows (flagged, plus detected when slot maps are given) kept out
+    of the bid pool."""
+    rules = KeeperRules(
+        cost_increment=config.keeper_cost_increment,
+        cost_floor=config.keeper_cost_floor,
+        max_consecutive_years=config.max_consecutive_keep_years,
+    )
+    keeper_rows: AbstractSet[tuple[int, str]] = frozenset()
+    if slot_to_roster_by_year is not None:
+        keeper_rows = detect_keeper_picks(picks_by_year, slot_to_roster_by_year, rules)
+    prices = PriceModel(build_bids(picks_by_year, seasons, exclude=keeper_rows))
+    keeper = KeeperModel(
+        build_transition_samples(seasons, prices, config.season),
+        rules=rules,
+    )
+    return prices, keeper
+
+
 def build_value_sheet(
     seasons: Mapping[int, Mapping[str, SeasonRow]],
     picks_by_year: Mapping[int, Sequence[Pick]],
     config: LeagueConfig,
+    slot_to_roster_by_year: Mapping[int, Mapping[int, int]] | None = None,
 ) -> list[SheetRow]:
     """The full ranked, priced player pool for the config's season.
 
@@ -535,17 +614,13 @@ def build_value_sheet(
     evaluated at the room price. Ranked by value, ties broken by player
     id after quantizing — two runs over the same inputs emit identical
     rows.
+
+    ``slot_to_roster_by_year`` (each year's draft ``slot_to_roster_id``)
+    lets the fit drop unflagged keeper rows hiding in the feeds; without
+    it only ``is_keeper``-flagged picks are dropped.
     """
     season = seasons[config.season]
-    prices = PriceModel(build_bids(picks_by_year, seasons))
-    keeper = KeeperModel(
-        build_transition_samples(seasons, prices, config.season),
-        rules=KeeperRules(
-            cost_increment=config.keeper_cost_increment,
-            cost_floor=config.keeper_cost_floor,
-            max_consecutive_years=config.max_consecutive_keep_years,
-        ),
-    )
+    prices, keeper = _fit_models(seasons, picks_by_year, config, slot_to_roster_by_year)
     worths = compute_worths(
         season, config.roster_slots, config.teams, config.auction_budget
     )

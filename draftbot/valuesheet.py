@@ -1,9 +1,11 @@
 """Value-sheet CLI: the full ranked, priced player pool for the season.
 
-Fetches the three historical picks feeds and the 2023-current projections
-(cached to disk by the client; a dead endpoint degrades to its cache),
-builds the static pre-draft sheet — worth, room price, and NPV-adjusted
-value per player — writes it as CSV, and prints the top of the board.
+Fetches the historical picks feeds, each draft's slot-to-roster map (owner
+identity, so unflagged keeper rows can be dropped from the price fit), and
+the 2023-current projections (cached to disk by the client; a dead endpoint
+degrades to its cache), builds the static pre-draft sheet — worth, room
+price, and NPV-adjusted value per player — writes it as CSV, and prints
+the top of the board.
 
 Run as ``python -m draftbot.valuesheet``.
 """
@@ -24,7 +26,7 @@ from pathlib import Path
 from typing import Callable, TextIO
 
 from draftbot.config import LeagueConfig, load_config
-from draftbot.models import parse_picks
+from draftbot.models import parse_draft, parse_picks
 from draftbot.sleeper_client import SleeperClient, SleeperUnavailableError
 from draftbot.valuation import SheetRow, build_value_sheet, parse_projections
 
@@ -49,9 +51,11 @@ CSV_HEADER = (
 
 
 def _fetch_inputs(client: SleeperClient, config: LeagueConfig):
-    """Historical picks and per-season projections, tracking degradation.
+    """Historical drafts, picks, and projections, tracking degradation.
 
-    Returns ``(picks_by_year, seasons, degraded)`` where ``degraded`` names
+    Returns ``(picks_by_year, seasons, slot_maps, degraded)``: parsed picks
+    and projections per year, each historical draft's slot-to-roster map
+    (owner identity for unflagged-keeper detection), and the set of
     endpoints served from the disk cache because the live fetch failed.
     """
     degraded: set[str] = set()
@@ -62,16 +66,29 @@ def _fetch_inputs(client: SleeperClient, config: LeagueConfig):
         return payload
 
     picks_by_year = {}
+    slot_maps = {}
     for year_text in sorted(config.historical_draft_ids):
         draft_id = config.historical_draft_ids[year_text]
         raw = watch(f"picks {year_text}", client.get_picks(draft_id=draft_id))
         picks_by_year[int(year_text)] = parse_picks(raw)
+        draft = watch(f"draft {year_text}", client.get_draft(draft_id=draft_id))
+        slot_maps[int(year_text)] = parse_draft(draft).slot_to_roster_id
     seasons = {}
     years = {int(year) for year in config.historical_draft_ids} | {config.season}
     for year in sorted(years):
         raw = watch(f"projections {year}", client.get_projections(season=year))
         seasons[year] = parse_projections(raw)
-    return picks_by_year, seasons, degraded
+    return picks_by_year, seasons, slot_maps, degraded
+
+
+def _build_rows(client: SleeperClient, config: LeagueConfig):
+    """Fetch everything and assemble the sheet; returns (rows, degraded).
+
+    Raises :class:`SleeperUnavailableError` when an endpoint has neither
+    a live response nor a cached copy.
+    """
+    picks_by_year, seasons, slot_maps, degraded = _fetch_inputs(client, config)
+    return build_value_sheet(seasons, picks_by_year, config, slot_maps), degraded
 
 
 def _csv_cells(row: SheetRow) -> list[str]:
@@ -182,12 +199,11 @@ def main(
         config, cache_dir=args.cache_dir, http_get=http_get, clock=clock
     )
     try:
-        picks_by_year, seasons, degraded = _fetch_inputs(client, config)
+        rows, degraded = _build_rows(client, config)
     except SleeperUnavailableError as error:
         print(f"error: {error}", file=err)
         return 2
 
-    rows = build_value_sheet(seasons, picks_by_year, config)
     out_path = _resolve_out_path(args, config.season)
     write_csv(rows, out_path)
     if degraded:

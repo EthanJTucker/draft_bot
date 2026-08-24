@@ -17,6 +17,7 @@ from draftbot.valuation import (
     PriceModel,
     build_bids,
     compute_worths,
+    detect_keeper_picks,
     parse_projections,
     replacement_ranks,
 )
@@ -44,11 +45,12 @@ def _projection_row(player_id, position, adp, pts=100.0, years_exp=3, name="A Pl
     }
 
 
-def _raw_pick(player_id, position, amount, slot=1):
+def _raw_pick(player_id, position, amount, slot=1, is_keeper=None):
     """One raw picks-feed entry (bid is a STRING in metadata.amount)."""
     return {
         "player_id": player_id,
         "draft_slot": slot,
+        "is_keeper": is_keeper,
         "metadata": {"amount": str(amount), "position": position},
     }
 
@@ -137,6 +139,69 @@ class TestBuildBids:
         seasons = {2023: parse_projections([_projection_row("101", "WR", 10.0)])}
         picks = {2023: parse_picks([_raw_pick("101", "TE", 9)])}
         assert build_bids(picks, seasons) == [Bid(position="TE", adp=10.0, amount=9)]
+
+
+class TestKeeperRowExclusion:
+    """Keeper rows ride the historical feeds as priced picks (verified in
+    the league's 2025 feed, unflagged). A keeper's cost is last year's
+    price plus $2, not a market-clearing bid — it must never enter the
+    price fit."""
+
+    # Draft order shuffles between seasons: roster 9 drafts from slot 1 in
+    # 2023 but slot 2 in 2024, so slot equality is NOT owner equality.
+    SLOT_MAPS = {2023: {1: 9, 2: 8}, 2024: {1: 8, 2: 9}}
+
+    def test_flagged_keeper_picks_never_become_bids(self):
+        """A pick with is_keeper=true is excluded even with a valid ADP."""
+        seasons = {2023: parse_projections([_projection_row("101", "RB", 10.0)])}
+        picks = {2023: parse_picks([_raw_pick("101", "RB", 10, is_keeper=True)])}
+        assert not build_bids(picks, seasons)
+
+    def test_same_roster_cost_chain_repeat_is_detected(self):
+        """Roster 9 pays $1 in 2023 and holds the player at exactly
+        max(1+2, 5)=$5 in 2024: that is the keeper signature — including
+        the $5 floor (a floorless chain would look for $3)."""
+        picks = {
+            2023: parse_picks([_raw_pick("k1", "WR", 1, slot=1)]),
+            2024: parse_picks([_raw_pick("k1", "WR", 5, slot=2)]),
+        }
+        assert detect_keeper_picks(picks, self.SLOT_MAPS) == {(2024, "k1")}
+
+    def test_different_roster_price_coincidence_is_not_a_keeper(self):
+        """A player sold to a DIFFERENT roster at the chain price is a real
+        auction sale (the league's 2025 feed has several: $2 -> $5 across
+        rosters). Slot-number equality must not fool the detector."""
+        picks = {
+            2023: parse_picks([_raw_pick("p1", "WR", 3, slot=1)]),
+            # Same SLOT as 2023, but slot 1 belongs to roster 8 in 2024.
+            2024: parse_picks([_raw_pick("p1", "WR", 5, slot=1)]),
+        }
+        assert not detect_keeper_picks(picks, self.SLOT_MAPS)
+
+    def test_same_roster_market_reauction_is_not_a_keeper(self):
+        """An owner re-buying his own player at a market price ($25 then
+        $38) kept nothing; only the exact cost chain is a keeper."""
+        picks = {
+            2023: parse_picks([_raw_pick("p1", "WR", 25, slot=1)]),
+            2024: parse_picks([_raw_pick("p1", "WR", 38, slot=2)]),
+        }
+        assert not detect_keeper_picks(picks, self.SLOT_MAPS)
+
+    def test_detected_keepers_are_excluded_from_the_bid_pool(self):
+        """End to end: the detected 2024 keeper row vanishes from the fit
+        while the genuine 2023 sale of the same player survives."""
+        seasons = {
+            2023: parse_projections([_projection_row("k1", "WR", 30.0)]),
+            2024: parse_projections([_projection_row("k1", "WR", 25.0)]),
+        }
+        picks = {
+            2023: parse_picks([_raw_pick("k1", "WR", 1, slot=1)]),
+            2024: parse_picks([_raw_pick("k1", "WR", 5, slot=2)]),
+        }
+        exclude = detect_keeper_picks(picks, self.SLOT_MAPS)
+        assert build_bids(picks, seasons, exclude=exclude) == [
+            Bid(position="WR", adp=30.0, amount=1)
+        ]
 
 
 class TestBandMedianRoomPrice:
