@@ -488,6 +488,26 @@ class TestAnalyzePlayer:
         assert analysis.tier is None
         assert analysis.max_bid == 1
 
+    def test_off_sheet_nominee_never_carries_the_pace_boost(self, config):
+        """Degenerate-state hardening: a failed or empty sheet load must
+        not render confident bids on unknown players. With no rows at
+        all, the pace boost sees pool value 0 and would otherwise treat
+        the entire \\$200 budget as burnable surplus (\\$13.33 a slot, max
+        bid \\$14 on every nominee); with a one-row sheet a ghost nominee
+        would carry nearly as much. The boost only ever burns surplus
+        into players the model actually prices: an off-sheet nominee
+        stays at the \\$1 floor."""
+        board = make_board({slot: 200 for slot in range(1, 13)}, drafted_slots=15)
+
+        empty_sheet = analyze_player("ghost", [], board, config, my_slot=7)
+        assert empty_sheet.spend_boost == 0.0
+        assert empty_sheet.max_bid == 1
+
+        one_row = [sheet_row(1, "rb40", "RB", 40.0)]
+        ghost = analyze_player("ghost", one_row, board, config, my_slot=7)
+        assert ghost.spend_boost == 0.0
+        assert ghost.max_bid == 1
+
     def test_my_slot_resolves_from_the_config_roster_id(self, config):
         """Without an explicit slot the engine finds my team by the
         config's roster id (the builder maps roster_id == slot, and the
@@ -632,6 +652,23 @@ class TestAnalyzePlayerKeepers:
         assert analysis.tier == TierStatus(
             tier=1, size=1, remaining=1, last_of_tier=True
         )
+
+    def test_keeper_board_without_keeper_ids_refuses_to_price(self, config):
+        """Fail loud, never silently wrong: the board itself proves
+        keepers exist (keeper_count > 0), so analyzing without
+        ``keepers_by_slot`` would misprice every layer all night — the
+        kept players wrongly stay in the pool denominators and vanish
+        from the roster. Mirrors the ``_resolve_my_slot`` guard: an
+        error, never a plausible number."""
+        board = make_board(
+            {1: 111, 3: 111, 7: 111}, drafted_slots=8, keeper_counts={3: 1}
+        )
+        with pytest.raises(ValueError, match="keeper"):
+            analyze_player("rb40", _league_rows(), board, config, my_slot=7)
+        with pytest.raises(ValueError, match="keeper"):
+            analyze_player(
+                "rb40", _league_rows(), board, config, my_slot=7, keepers_by_slot={}
+            )
 
     def test_inflation_and_pace_boost_price_the_keeper_excluded_pool(self, config):
         """Anti-cheat for keepers dropped from the ratio or the pace

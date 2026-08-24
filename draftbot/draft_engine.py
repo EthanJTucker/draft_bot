@@ -463,11 +463,29 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     can call it at the moment of any historical sale and the dashboard
     can call it on every poll. ``my_slot`` overrides the config's roster
     id lookup (replays of drafts I was not in need one).
+
+    Raises ``ValueError`` when the board shows kept players but no
+    ``keepers_by_slot`` was supplied (silently mispricing a keeper
+    board is worse than stopping), and when the config's roster id is
+    not on the board and ``my_slot`` was not passed. An off-sheet
+    nominee prices at floor economics and never carries the pace boost.
     """
     slot = _resolve_my_slot(board, config) if my_slot is None else my_slot
     me = board.team(slot)
     sold = frozenset(sale.player_id for sale in board.sales)
     keepers = _keeper_ids(keepers_by_slot)
+
+    # Fail loud on the silent-keeper seam: a board that itself proves
+    # keepers exist, analyzed without the keeper ids, would misprice
+    # every layer (kept players wrongly stay in the pool denominators
+    # and vanish from the roster) — an error, never a plausible number.
+    kept_on_board = sum(team.keeper_count for team in board.teams)
+    if kept_on_board and not keepers:
+        raise ValueError(
+            f"the board shows {kept_on_board} kept player(s) but no keeper "
+            "ids were supplied; pass keepers_by_slot so the engine can "
+            "exclude them from the buyable pool"
+        )
 
     row = next((r for r in rows if r.player_id == player_id), None)
     off_sheet = row is None
@@ -486,6 +504,12 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     need_adjusted = _need_adjusted_price(row, inflated, marginal)
 
     margin, boost = spend_schedule(board, slot, rows, inflation_map, keepers_by_slot)
+    if off_sheet:
+        # The boost burns surplus into players the model actually
+        # prices, never into unknowns: a degenerate (empty or failed)
+        # sheet load would otherwise read the whole pool as absorbed
+        # and emit confident double-digit bids on off-sheet nominees.
+        boost = 0.0
     if me.open_slots > 0:
         spend_adjusted = _quantize(
             FLOOR_PRICE + (need_adjusted - FLOOR_PRICE) * margin + boost
