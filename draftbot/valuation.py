@@ -16,6 +16,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from draftbot.config import LeagueConfig
 from draftbot.models import Pick
 
 #: Positions with an auction market worth modeling; K/DEF go for $1 here.
@@ -170,6 +171,18 @@ class PriceModel:
         if len(band) >= MIN_BAND_SAMPLES:
             return float(statistics.median(band))
         return self.curve_price(position, adp)
+
+    def price_source(self, position: str, adp: float | None) -> str:
+        """Which rule priced this player: "band", "curve", or "floor".
+
+        Mirrors :meth:`room_price` exactly — the band wins first, and a
+        position with no fittable curve falls to the $1 floor.
+        """
+        if not _valid_adp(adp):
+            return "floor"
+        if len(self.band_amounts(position, adp)) >= MIN_BAND_SAMPLES:
+            return "band"
+        return "curve" if self._curves.get(position) is not None else "floor"
 
 
 #: Share of each FLEX slot assumed to go to RB/WR/TE when computing how
@@ -472,3 +485,101 @@ class KeeperModel:
         if keeps_left >= 2:
             value += self._gamma**2 * options.two_year
         return _quantize(value)
+
+
+#: Positions that appear on the value sheet (the drafted roster's needs).
+SHEET_POSITIONS = ("QB", "RB", "WR", "TE", "K", "DEF")
+
+
+@dataclass(frozen=True)
+class SheetRow:
+    """One line of the ranked, priced player pool."""
+
+    # pylint: disable=too-many-instance-attributes  # record type mirroring
+    # the emitted CSV's columns one-to-one.
+
+    rank: int
+    player_id: str
+    name: str
+    position: str
+    adp: float | None
+    points: float | None
+    worth: float
+    room_price: float
+    price_source: str
+    keeper_premium: float
+    value: float
+
+
+def _keeper_premium(keeper: KeeperModel, row: SeasonRow, room_price: float) -> float:
+    """The discounted keep-again premium for a fresh auction buy at the
+    room price (zero prior keeps; K/DEF have no keeper market)."""
+    if row.position not in VALUED_POSITIONS:
+        return 0.0
+    options = keeper.option_values(
+        row.position, row.years_exp_snapshot, room_price, room_price
+    )
+    return keeper.premium(options)
+
+
+def build_value_sheet(
+    seasons: Mapping[int, Mapping[str, SeasonRow]],
+    picks_by_year: Mapping[int, Sequence[Pick]],
+    config: LeagueConfig,
+) -> list[SheetRow]:
+    """The full ranked, priced player pool for the config's season.
+
+    Every player with an ADP or positive projection at a rosterable
+    position gets worth (VBD dollars), room price (band median with curve
+    fallback), and an NPV-adjusted value: worth plus the keeper premium
+    evaluated at the room price. Ranked by value, ties broken by player
+    id after quantizing — two runs over the same inputs emit identical
+    rows.
+    """
+    season = seasons[config.season]
+    prices = PriceModel(build_bids(picks_by_year, seasons))
+    keeper = KeeperModel(
+        build_transition_samples(seasons, prices, config.season),
+        rules=KeeperRules(
+            cost_increment=config.keeper_cost_increment,
+            cost_floor=config.keeper_cost_floor,
+            max_consecutive_years=config.max_consecutive_keep_years,
+        ),
+    )
+    worths = compute_worths(
+        season, config.roster_slots, config.teams, config.auction_budget
+    )
+    unranked = []
+    for player_id in sorted(season):
+        row = season[player_id]
+        draftable = _valid_adp(row.adp) or (row.points or 0) > 0
+        if row.position not in SHEET_POSITIONS or not draftable:
+            continue
+        room = _quantize(prices.room_price(row.position, row.adp))
+        premium = _keeper_premium(keeper, row, room)
+        unranked.append(
+            (
+                _quantize(worths[player_id] + premium),
+                row,
+                room,
+                prices.price_source(row.position, row.adp),
+                premium,
+            )
+        )
+    unranked.sort(key=lambda entry: (-entry[0], entry[1].player_id))
+    return [
+        SheetRow(
+            rank=rank,
+            player_id=row.player_id,
+            name=row.name,
+            position=row.position,
+            adp=row.adp,
+            points=row.points,
+            worth=worths[row.player_id],
+            room_price=room,
+            price_source=source,
+            keeper_premium=premium,
+            value=value,
+        )
+        for rank, (value, row, room, source, premium) in enumerate(unranked, start=1)
+    ]
