@@ -98,9 +98,11 @@
   .me-row { outline: 2px solid var(--accent); }
   .needs { color: var(--amber); font-size: 12px; }
 
-  #footer { color: var(--dim); font-size: 12px; margin-top: 10px; display: flex; gap: 18px; }
+  #footer { color: var(--dim); font-size: 12px; margin-top: 10px; display: flex; gap: 18px; flex-wrap: wrap; }
   #sales li { list-style: none; padding: 1px 0; color: var(--dim); }
   #sales b { color: var(--text); font-weight: 600; }
+  .legend { color: var(--dim); font-size: 11px; margin-top: 6px; }
+  #foot-note { color: var(--amber); }
 </style>
 </head>
 <body>
@@ -140,6 +142,7 @@
         <h2>Team budgets (remaining)</h2>
         <table><thead><tr><th>Slot</th><th></th><th>Needs</th><th>$ left</th><th>Open</th><th>Max</th></tr></thead>
         <tbody id="teams"></tbody></table>
+        <div class="legend">* budget not entered on Sleeper yet; shown at the league default</div>
       </div>
       <div class="panel" style="margin-top:12px">
         <h2>Recent sales</h2>
@@ -153,6 +156,7 @@
     <span id="foot-polls"></span>
     <span id="foot-sales"></span>
     <span id="foot-updated"></span>
+    <span id="foot-note"></span>
   </div>
 
 <script>
@@ -338,14 +342,39 @@ function render(s) {
   put('foot-polls', 'polls: ' + s.poll_count);
   put('foot-sales', 'sales: ' + (s.sales || []).length +
     (s.off_model_player_ids && s.off_model_player_ids.length ? ' (' + s.off_model_player_ids.length + ' off-model)' : ''));
-  put('foot-updated', 'updated poll #' + s.poll_count);
+  put('foot-updated', s.updated_at
+    ? 'updated ' + new Date(s.updated_at * 1000).toLocaleTimeString() + ' (poll #' + s.poll_count + ')'
+    : 'updated poll #' + s.poll_count);
+  put('foot-note', s.note || '');
+}
+
+function paintRenderFailure(s, message) {
+  /* The render itself crashed part-way: everything painted after the
+     throw point is the PREVIOUS lot's data next to this lot's name.
+     Say so in red rather than silently mixing two lots. */
+  var el = document.getElementById('banners');
+  try { renderBanners(s); } catch (ignored) { el.innerHTML = ''; }
+  el.innerHTML += '<div class="banner red">PAGE RENDER FAILED — values on screen may be stale (' +
+    esc(message) + ')</div>';
 }
 
 function tick() {
   fetch('/state', { cache: 'no-store' })
     .then(function (r) { return r.json(); })
-    .then(function (s) { failures = 0; render(s); })
-    .catch(function () { failures += 1; if (lastState) renderBanners(lastState); });
+    .then(function (s) {
+      try {
+        render(s);
+        failures = 0; /* only a fully successful render counts as healthy */
+      } catch (err) {
+        paintRenderFailure(s, String(err));
+      }
+    })
+    .catch(function () {
+      failures += 1;
+      /* No lastState yet (server down at page load) still deserves the
+         DISCONNECTED banner: renderBanners tolerates an empty state. */
+      renderBanners(lastState || {});
+    });
 }
 tick();
 setInterval(tick, 1000);

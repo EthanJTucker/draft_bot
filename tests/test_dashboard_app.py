@@ -110,11 +110,16 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
         'id="teams"',
         'id="my-team"',
         'id="banners"',
+        'id="foot-note"',
     ):
         assert element_id in page
     assert "http://" not in page.replace("http://localhost", "")
     assert "https://" not in page  # fully self-contained: no external assets
     assert "/state" in page
+    # The honest-failure surfaces: a crashed render says so in red, and
+    # the default-budget asterisk carries its legend.
+    assert "PAGE RENDER FAILED" in page
+    assert "budget not entered on Sleeper yet" in page
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
@@ -199,6 +204,8 @@ def test_replay_cli_wires_the_full_stack_with_zero_manual_input():
     # Roster 7 drafted from slot 8 in 2025: my_slot resolves from config.
     assert state["me"]["slot"] == 8
     assert not state["settings_warnings"]
+    # The demo's all-PASS/$0 caveat rides the snapshot onto the page.
+    assert "PASS by construction" in state["note"]
 
     client = TestClient(server.app)
     assert client.get("/state").json()["poll_count"] == 2
@@ -223,6 +230,8 @@ def test_replay_cli_accepts_a_real_sheet_csv(tmp_path):
     assert state["nomination"]["analysis"]["worth"] == 44.0
     # Every other 2025 sale is off this one-row sheet: flagged, not hidden.
     assert state["players"] == []
+    # A real sheet is not the demo: no all-PASS caveat on the page.
+    assert state["note"] is None
 
 
 def _live_transport(rosters):

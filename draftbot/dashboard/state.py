@@ -99,6 +99,7 @@ class DashboardPoller:
         keepers_by_slot: Mapping[int, Sequence[str]],
         my_slot: int | None = None,
         clock: Callable[[], float] = time.time,
+        note: str | None = None,
     ):
         self._source = source
         self._tracker = tracker
@@ -110,6 +111,9 @@ class DashboardPoller:
         }
         self._my_slot = my_slot
         self._clock = clock
+        # A standing on-page caveat about THIS serving mode (the replay
+        # demo's all-PASS/$0 shape); None in live mode.
+        self._note = note
         self._names = {row.player_id: row.name for row in self._rows}
         self._positions = {row.player_id: row.position for row in self._rows}
         self._board: BoardState | None = None
@@ -203,6 +207,7 @@ class DashboardPoller:
             "players": self._players_json(board),
             "sales": [self._sale_json(sale) for sale in board.sales],
             "off_model_player_ids": list(board.off_model_player_ids),
+            "note": self._note,
         }
 
     def _resolve_my_slot(self, board: BoardState) -> int | None:

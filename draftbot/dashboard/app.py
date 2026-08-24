@@ -274,7 +274,9 @@ def main(
     runtime = _build_runtime(args, config, err, http_get=http_get)
     if runtime is None:
         return 2
-    poller = _wire_poller(runtime, config, my_slot=args.my_slot)
+    poller = _wire_poller(
+        runtime, config, my_slot=args.my_slot, note=_mode_note(args)
+    )
     app = create_app(poller)
     interval = args.interval / max(args.accelerate, 1e-9)
     print(
@@ -288,7 +290,23 @@ def main(
     return 0
 
 
-def _wire_poller(runtime, config: LeagueConfig, *, my_slot: int | None):
+def _mode_note(args: argparse.Namespace) -> str | None:
+    """The standing on-page caveat for the current mode: the replay demo
+    with no --sheet prices every lot at its own hammer, so profit reads
+    $0 and every verdict is PASS by construction — a viewer who skipped
+    the README should learn that from the page, not wonder at it."""
+    if args.replay is not None and args.sheet is None:
+        return (
+            "replay demo sheet (derived from this replay's own hammer "
+            "prices): profit reads $0 and every verdict is PASS by "
+            "construction"
+        )
+    return None
+
+
+def _wire_poller(
+    runtime, config: LeagueConfig, *, my_slot: int | None, note: str | None = None
+):
     """Tracker + poller over one runtime, wired consistently: the same
     keeper mapping feeds both (the tracker's keeper counts and the
     engine's keeper exclusions must never disagree), and the same sheet
@@ -302,5 +320,11 @@ def _wire_poller(runtime, config: LeagueConfig, *, my_slot: int | None):
         value_sheet=value_map(rows),
     )
     return DashboardPoller(
-        source, tracker, rows, config, keepers_by_slot=keepers, my_slot=my_slot
+        source,
+        tracker,
+        rows,
+        config,
+        keepers_by_slot=keepers,
+        my_slot=my_slot,
+        note=note,
     )
