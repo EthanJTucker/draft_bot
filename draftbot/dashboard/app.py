@@ -274,9 +274,7 @@ def main(
     runtime = _build_runtime(args, config, err, http_get=http_get)
     if runtime is None:
         return 2
-    poller = _wire_poller(
-        runtime, config, my_slot=args.my_slot, note=_mode_note(args)
-    )
+    poller = _wire_poller(runtime, config, my_slot=args.my_slot, note=_mode_note(args))
     app = create_app(poller)
     interval = args.interval / max(args.accelerate, 1e-9)
     print(
