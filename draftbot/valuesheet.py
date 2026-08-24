@@ -21,6 +21,7 @@ import argparse
 import csv
 import sys
 import time
+import tomllib
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, TextIO
@@ -179,8 +180,9 @@ def main(
 
     ``http_get``, ``clock``, and ``out`` are injectable for tests. Exit
     codes: 0 sheet written (cache-served endpoints are labeled with a
-    warning); 2 nothing produced (bad config path, or an endpoint with
-    neither a live response nor a cached copy).
+    warning); 2 nothing produced (missing, unparseable, or incomplete
+    config, or an endpoint with neither a live response nor a cached
+    copy).
     """
     args = _parse_args(argv)
     if out is None and hasattr(sys.stdout, "reconfigure"):
@@ -194,6 +196,17 @@ def main(
         config = load_config(args.config)
     except FileNotFoundError:
         print(f"error: config file not found: {args.config}", file=err)
+        return 2
+    except tomllib.TOMLDecodeError as error:
+        print(
+            f"error: config file is not valid TOML: {args.config} ({error})", file=err
+        )
+        return 2
+    except KeyError as error:
+        print(
+            f"error: config file {args.config} is missing required key {error}",
+            file=err,
+        )
         return 2
     client = SleeperClient(
         config, cache_dir=args.cache_dir, http_get=http_get, clock=clock

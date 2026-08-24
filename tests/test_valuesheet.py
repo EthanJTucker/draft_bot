@@ -268,3 +268,32 @@ def test_missing_config_exits_2(tmp_path):
     )
     assert code == 2
     assert "config" in out.getvalue().lower()
+
+
+def test_malformed_toml_config_exits_2(tmp_path):
+    """Unparseable TOML is a one-line error and exit 2, not a traceback."""
+    bad = tmp_path / "bad.toml"
+    bad.write_text("[league\nname =", encoding="utf-8")
+    out = io.StringIO()
+    code = main(["--config", str(bad)], http_get=lambda url: b"{}", out=out)
+    assert code == 2
+    printed = out.getvalue()
+    assert "error" in printed.lower()
+    assert "toml" in printed.lower()
+    assert "Traceback" not in printed
+
+
+def test_config_missing_required_section_exits_2(tmp_path):
+    """Valid TOML missing a required table ([keeper]) names the missing
+    key in a one-line error and exits 2, not a traceback."""
+    partial = tmp_path / "partial.toml"
+    partial.write_text(
+        CONFIG_TOML.replace("[keeper]", "[keeper_typo]"), encoding="utf-8"
+    )
+    out = io.StringIO()
+    code = main(["--config", str(partial)], http_get=lambda url: b"{}", out=out)
+    assert code == 2
+    printed = out.getvalue()
+    assert "error" in printed.lower()
+    assert "keeper" in printed
+    assert "Traceback" not in printed
