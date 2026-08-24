@@ -112,8 +112,8 @@ def test_estimates_are_priced_on_the_pre_sale_board(replay):
     against BOTH — the recorded estimate must equal the pre-sale number
     and differ from the post-sale one. Lot 2 is the sharpest lever: a $55
     sale my own team won, where post-sale pricing also collapses the max
-    bid to a bench-retention number because the player already sits on my
-    roster. The pre != post assertions keep the test honest — if the
+    bid from 32 to a bench-retention 7 because the player already sits on
+    my roster. The pre != post assertions keep the test honest — if the
     boards ever stopped disagreeing, the test fails loudly instead of
     passing vacuously."""
     config, rows = replay["config"], replay["rows"]
@@ -139,7 +139,7 @@ def test_estimates_are_priced_on_the_pre_sale_board(replay):
         assert records[lot - 1].max_bid == pre.max_bid
         assert pre.inflation_adjusted != post.inflation_adjusted
         if lot == 2:  # my own team's buy: the roster-collapse lever
-            assert pre.max_bid != post.max_bid
+            assert (pre.max_bid, post.max_bid) == (32, 7)
     assert lot == 180  # every checked lot was actually reached
 
 

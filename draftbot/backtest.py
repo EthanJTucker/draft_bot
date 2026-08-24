@@ -510,7 +510,7 @@ def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow])
     run = overall_stats(records, "running")
     static = overall_stats(records, "static")
     early, mid, late = segment_stats(records, "running")
-    high = max(record.inflation for record in scored)
+    opening = scored[0].inflation
     clamped = sum(1 for record in scored if record.inflation == INFLATION_MIN)
     sold = {record.player_id for record in records}
     unsold = sum(
@@ -525,8 +525,9 @@ The calibration lives in the static sheet: MAE {static.mae:.2f}, bias
 prices to within about two dollars a lot, with no meaningful drift
 (segment table above). The running estimate then multiplies that sheet
 by remaining-money-over-remaining-value per position, and that ratio
-opens at {high:.3f} and only falls: the engine's denominator counts
-EVERY unsold sheet row as competing for the room's money, but an
+opens at {opening:.3f} and, on RB and WR (the positions carrying
+the drift), only falls: the engine's denominator counts EVERY
+unsold sheet row as competing for the room's money, but an
 auction only absorbs 180 lots. The overhang never clears — when the
 last lot closes, ${unsold:.0f} of taper-weighted above-floor sheet
 value is still unsold against the $1464 of discretionary money the
@@ -539,11 +540,11 @@ falling without it. {clamped} of the {run.n} scored lots price at
 exactly that clamp. The resulting drift: the early board runs
 {early.stats.bias:+.2f} per lot, and the bias then shrinks
 ({mid.stats.bias:+.2f} mid, {late.stats.bias:+.2f} late) NOT because
-the ratio recovers — it never does — but because mid and late lots
-carry too little taper-weighted above-floor worth for a wrong ratio to
-move. Overall the running estimate scores MAE {run.mae:.2f}, bias
-{run.bias:+.2f} — strictly worse than the static sheet it adjusts, on
-this fixture.
+the ratio recovers — it never regains more than a few cents — but
+because mid and late lots carry too little taper-weighted above-floor
+worth for a wrong ratio to move. Overall the running estimate scores
+MAE {run.mae:.2f}, bias {run.bias:+.2f} — strictly worse than the
+static sheet it adjusts, on this fixture.
 
 The shape is not an artifact of the sheet's normalization basis:
 rescaling the sheet's above-floor prices so the engine's

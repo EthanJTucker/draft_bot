@@ -68,8 +68,9 @@ The calibration lives in the static sheet: MAE 2.24, bias
 prices to within about two dollars a lot, with no meaningful drift
 (segment table above). The running estimate then multiplies that sheet
 by remaining-money-over-remaining-value per position, and that ratio
-opens at 0.599 and only falls: the engine's denominator counts
-EVERY unsold sheet row as competing for the room's money, but an
+opens at 0.599 and, on RB and WR (the positions carrying
+the drift), only falls: the engine's denominator counts EVERY
+unsold sheet row as competing for the room's money, but an
 auction only absorbs 180 lots. The overhang never clears — when the
 last lot closes, $1115 of taper-weighted above-floor sheet
 value is still unsold against the $1464 of discretionary money the
@@ -82,11 +83,11 @@ falling without it. 84 of the 159 scored lots price at
 exactly that clamp. The resulting drift: the early board runs
 -11.81 per lot, and the bias then shrinks
 (-2.69 mid, -0.02 late) NOT because
-the ratio recovers — it never does — but because mid and late lots
-carry too little taper-weighted above-floor worth for a wrong ratio to
-move. Overall the running estimate scores MAE 5.54, bias
--5.31 — strictly worse than the static sheet it adjusts, on
-this fixture.
+the ratio recovers — it never regains more than a few cents — but
+because mid and late lots carry too little taper-weighted above-floor
+worth for a wrong ratio to move. Overall the running estimate scores
+MAE 5.54, bias -5.31 — strictly worse than the
+static sheet it adjusts, on this fixture.
 
 The shape is not an artifact of the sheet's normalization basis:
 rescaling the sheet's above-floor prices so the engine's
