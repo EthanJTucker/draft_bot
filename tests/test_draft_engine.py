@@ -13,6 +13,7 @@ import pytest
 
 from draftbot.draft_engine import (
     MARGIN_BASE,
+    analyze_player,
     build_tiers,
     inflation_adjusted_price,
     marginal_lineup_worth,
@@ -304,6 +305,170 @@ class TestSpendSchedule:
     def test_full_roster_has_no_schedule(self):
         board = make_board({1: 5, 2: 30}, drafted_slots=0)
         assert spend_schedule(board, 1, _inflation_rows(), {}) == (0.0, 0.0)
+
+
+def _league_rows():
+    """A small but league-shaped sheet: every drafted position present,
+    plus zero-weight tail rows past the taper."""
+    return [
+        sheet_row(1, "rb40", "RB", 40.0),
+        sheet_row(2, "wr40", "WR", 40.0),
+        sheet_row(3, "wr35", "WR", 35.0),
+        sheet_row(4, "rb30", "RB", 30.0),
+        sheet_row(5, "wr30", "WR", 30.0),
+        sheet_row(6, "rb25", "RB", 25.0),
+        sheet_row(7, "rb20", "RB", 20.0),
+        sheet_row(8, "wr20", "WR", 20.0),
+        sheet_row(9, "te18", "TE", 18.0),
+        sheet_row(10, "qb15", "QB", 15.0),
+        sheet_row(11, "rb15", "RB", 15.0),
+        sheet_row(12, "qb12", "QB", 12.0),
+        sheet_row(13, "qb9", "QB", 9.0),
+        sheet_row(14, "qb8", "QB", 8.0),
+        sheet_row(15, "te6", "TE", 6.0),
+        sheet_row(16, "k2", "K", 2.0),
+        sheet_row(17, "def2", "DEF", 2.0),
+        sheet_row(160, "rbtail", "RB", 4.0),
+        sheet_row(161, "wrtail", "WR", 4.0),
+    ]
+
+
+def _league_board(sales=(), budgets=None, off_model=()):
+    """Twelve $200 teams drafting fifteen slots each, tracker-consistent."""
+    return make_board(
+        budgets or {slot: 200 for slot in range(1, 13)},
+        sales,
+        drafted_slots=15,
+        off_model=off_model,
+    )
+
+
+class TestAnalyzePlayer:
+    """The pure entry point: one renderable record per nominated player."""
+
+    def test_record_composes_the_layers_consistently(self, config):
+        """Every number a dashboard shows is on the record, and the
+        layered prices reconcile with the public component functions."""
+        rows = _league_rows()
+        board = _league_board([Sale("wr40", 43, 3)])
+        analysis = analyze_player("rb40", rows, board, config, my_slot=7)
+
+        assert analysis.player_id == "rb40"
+        assert analysis.position == "RB"
+        assert analysis.rank == 1
+        assert analysis.worth == 40.0
+        assert analysis.value == 40.0
+        inflation = positional_inflation(rows, board)
+        assert analysis.inflation == inflation["RB"]
+        assert analysis.inflation_adjusted == inflation_adjusted_price(
+            rows[0], inflation["RB"]
+        )
+        # Empty roster: rb40 is fully marginal, so need changes nothing.
+        assert analysis.marginal_worth == 40.0
+        assert analysis.need_bump == 0.0
+        assert analysis.need_adjusted == analysis.inflation_adjusted
+        margin, boost = spend_schedule(board, 7, rows, inflation)
+        assert analysis.spend_margin == margin
+        assert analysis.spend_boost == boost
+        assert analysis.spend_adjusted == pytest.approx(
+            1.0 + (analysis.need_adjusted - 1.0) * margin + boost
+        )
+        assert analysis.tier == tier_status("rb40", build_tiers(rows), frozenset({"wr40"}))
+        assert analysis.my_cap == board.team(7).max_bid
+        assert analysis.max_bid == int(analysis.spend_adjusted)
+
+    def test_third_qb_prices_at_bench_not_starter(self, config):
+        """Acceptance: with two better QBs already mine, the third QB's
+        marginal value is zero and his price collapses to bench retention
+        — a fraction of what the same player costs while my QB slot is
+        open, whatever the room's inflation level happens to be."""
+        rows = _league_rows()
+        board = _league_board([Sale("qb12", 12, 7), Sale("qb9", 9, 7)])
+        third = analyze_player("qb8", rows, board, config, my_slot=7)
+        starter = analyze_player("qb8", rows, _league_board(), config, my_slot=7)
+
+        assert third.marginal_worth == 0.0
+        assert third.need_bump < 0.0
+        assert third.max_bid < starter.max_bid / 2
+
+    def test_scarce_starting_slot_beats_the_redundant_case(self, config):
+        """The need bump in one comparison: the same QB is priced with my
+        QB slot open (fully marginal, no discount) and with it filled
+        twice over (bench retention). Open must cost more."""
+        rows = _league_rows()
+        scarce = analyze_player("qb8", rows, _league_board(), config, my_slot=7)
+        stacked_board = _league_board([Sale("qb12", 12, 7), Sale("qb9", 9, 7)])
+        redundant = analyze_player("qb8", rows, stacked_board, config, my_slot=7)
+
+        assert scarce.marginal_worth == 8.0
+        assert scarce.need_bump == 0.0
+        assert redundant.need_bump < 0.0
+        assert scarce.need_adjusted > redundant.need_adjusted
+
+    def test_max_bid_never_exceeds_my_team_cap(self, config):
+        """A rich stack against a broke room drives the schedule way up;
+        the emitted bid still respects max-bid ($1 reserved per other
+        open slot), which is the tracker's number, not re-derived here."""
+        budgets = {slot: 20 for slot in range(1, 13)} | {7: 200}
+        board = make_board(budgets, drafted_slots=3)
+        analysis = analyze_player("rb40", _league_rows(), board, config, my_slot=7)
+
+        assert board.team(7).max_bid == 198
+        assert analysis.spend_adjusted > 198
+        assert analysis.max_bid == 198
+
+    def test_full_roster_bids_zero(self, config):
+        """No open slots: the record still renders, the bid is $0."""
+        board = make_board(
+            {slot: 200 for slot in range(1, 13)},
+            [Sale(f"p{n}", 1, 7) for n in range(3)],
+            drafted_slots=3,
+        )
+        analysis = analyze_player("rb40", _league_rows(), board, config, my_slot=7)
+        assert analysis.max_bid == 0
+        assert analysis.spend_adjusted == 0.0
+
+    def test_off_sheet_nominee_gets_a_floor_record(self, config):
+        """A nominated player the sheet does not price still renders: $1
+        floor economics, no tier, no crash."""
+        analysis = analyze_player(
+            "ghost", _league_rows(), _league_board(), config, my_slot=7
+        )
+        assert analysis.rank is None
+        assert analysis.worth == 1.0
+        assert analysis.tier is None
+        assert analysis.max_bid == 1
+
+    def test_my_slot_resolves_from_the_config_roster_id(self, config):
+        """Without an explicit slot the engine finds my team by the
+        config's roster id (the builder maps roster_id == slot, and the
+        checked-in config says roster 7)."""
+        explicit = analyze_player(
+            "rb40", _league_rows(), _league_board(), config, my_slot=7
+        )
+        resolved = analyze_player("rb40", _league_rows(), _league_board(), config)
+        assert resolved == explicit
+
+    def test_unresolvable_slot_raises_instead_of_guessing(self, config):
+        board = make_board({1: 200}, drafted_slots=15)
+        with pytest.raises(ValueError, match="roster"):
+            analyze_player("rb40", _league_rows(), board, config)
+
+    def test_double_run_is_byte_identical(self, config):
+        """Determinism: the same inputs analyzed twice produce equal
+        records with identical reprs, for every player on the sheet."""
+        rows = _league_rows()
+        board = _league_board([Sale("wr40", 43, 3), Sale("rb30", 22, 7)])
+
+        def sweep():
+            return [
+                analyze_player(row.player_id, rows, board, config, my_slot=7)
+                for row in rows
+            ]
+
+        first, second = sweep(), sweep()
+        assert first == second
+        assert [repr(item) for item in first] == [repr(item) for item in second]
 
 
 class TestTaperWeight:

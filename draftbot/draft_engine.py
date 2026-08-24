@@ -24,10 +24,12 @@ the dashboard (issue #7) only renders the returned analysis record.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
+from draftbot.config import LeagueConfig
 from draftbot.tracker import FLEX_ELIGIBLE, BoardState
 from draftbot.valuation import FLOOR_PRICE, SheetRow
 
@@ -43,6 +45,12 @@ TAPER_ZERO_RANK = 150
 #: the draft must not emit an absurd multiplier.
 INFLATION_MIN = 0.25
 INFLATION_MAX = 3.0
+
+#: A player with zero lineup-marginal worth still keeps this fraction of
+#: his above-floor worth: bench depth covers byes and injuries even when
+#: it never starts. The keeper premium is bench value by nature and is
+#: never need-discounted at all.
+BENCH_RETENTION = 0.25
 
 #: The spend-down margin at money parity: max bids deliberately start
 #: this fraction of the way to value (bargain early)...
@@ -306,7 +314,7 @@ def tier_status(
 
 
 def build_tiers(
-    rows: list[SheetRow] | tuple[SheetRow, ...],
+    rows: Sequence[SheetRow],
 ) -> dict[str, tuple[tuple[str, ...], ...]]:
     """Gap-based tiers per position: player ids in value order, split
     where the drop to the next player is at least ``TIER_ABS_GAP`` dollars
@@ -328,3 +336,158 @@ def build_tiers(
             grouped[-1].append(row.player_id)
         tiers[position] = tuple(tuple(group) for group in grouped)
     return tiers
+
+
+@dataclass(frozen=True)
+class PlayerAnalysis:
+    """One nominated player, fully priced: every number the dashboard
+    (issue #7) renders, so that slice only formats what is already here.
+
+    The price layers reconcile by construction:
+    ``inflation_adjusted`` is the sheet value under the position's
+    tapered inflation; ``need_adjusted`` adds ``need_bump`` (zero for a
+    player my lineup fully uses, negative toward bench retention for a
+    redundant one); ``spend_adjusted`` applies the margin and boost; and
+    ``max_bid`` is that number floored to whole dollars and capped by my
+    team's max bid.
+    """
+
+    # pylint: disable=too-many-instance-attributes  # derived record type:
+    # one field per number the dashboard shows for the nominated player.
+
+    player_id: str
+    name: str
+    position: str | None
+    rank: int | None
+    worth: float
+    keeper_premium: float
+    value: float
+    inflation: float
+    inflation_adjusted: float
+    marginal_worth: float
+    need_bump: float
+    need_adjusted: float
+    spend_margin: float
+    spend_boost: float
+    spend_adjusted: float
+    tier: TierStatus | None
+    my_cap: int
+    max_bid: int
+
+
+def _resolve_my_slot(board: BoardState, config: LeagueConfig) -> int:
+    for team in board.teams:
+        if team.roster_id == config.my_roster_id:
+            return team.slot
+    raise ValueError(
+        f"no team on the board has roster id {config.my_roster_id}; "
+        "pass my_slot explicitly"
+    )
+
+
+def _need_adjusted_price(
+    row: SheetRow, inflation_adjusted: float, marginal: float
+) -> float:
+    """Scale the inflated above-floor worth by how much of the player my
+    lineup actually uses; the keeper premium (bench value by nature) and
+    the $1 floor ride through whole."""
+    fraction = min(1.0, max(0.0, marginal / row.worth)) if row.worth > 0 else 0.0
+    multiplier = BENCH_RETENTION + (1.0 - BENCH_RETENTION) * fraction
+    inflated_discretionary = inflation_adjusted - FLOOR_PRICE - row.keeper_premium
+    return _quantize(
+        FLOOR_PRICE + inflated_discretionary * multiplier + row.keeper_premium
+    )
+
+
+def _off_sheet_row(player_id: str) -> SheetRow:
+    """Floor economics for a nominated player the sheet does not price:
+    $1 worth, no premium, no rank (so the taper zeroes him out)."""
+    return SheetRow(
+        rank=None,
+        player_id=player_id,
+        name=player_id,
+        position=None,
+        adp=None,
+        points=None,
+        worth=FLOOR_PRICE,
+        room_price=FLOOR_PRICE,
+        price_source="floor",
+        keeper_premium=0.0,
+        value=FLOOR_PRICE,
+    )
+
+
+def analyze_player(
+    player_id: str,
+    rows: Sequence[SheetRow],
+    board: BoardState,
+    config: LeagueConfig,
+    *,
+    keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
+    my_slot: int | None = None,
+) -> PlayerAnalysis:
+    # pylint: disable=too-many-locals  # the orchestrator: one local per
+    # layer of the record it assembles, each computed by a public helper.
+    """The engine's entry point: one player priced against one board.
+
+    A pure function of (value sheet, board state, config) — plus the
+    keeper lists the picks feed never carries — so the replay backtest
+    can call it at the moment of any historical sale and the dashboard
+    can call it on every poll. ``my_slot`` overrides the config's roster
+    id lookup (replays of drafts I was not in need one).
+    """
+    slot = _resolve_my_slot(board, config) if my_slot is None else my_slot
+    me = board.team(slot)
+    sold = frozenset(sale.player_id for sale in board.sales)
+    keepers = _keeper_ids(keepers_by_slot)
+
+    row = next((r for r in rows if r.player_id == player_id), None)
+    off_sheet = row is None
+    if off_sheet:
+        row = _off_sheet_row(player_id)
+
+    inflation_map = positional_inflation(rows, board, keepers_by_slot)
+    inflation = inflation_map.get(row.position, 1.0) if not off_sheet else 1.0
+    inflated = inflation_adjusted_price(row, inflation)
+
+    owned = [
+        *(keepers_by_slot or {}).get(slot, ()),
+        *(sale.player_id for sale in board.sales if sale.draft_slot == slot),
+    ]
+    marginal = marginal_lineup_worth(player_id, owned, rows, config.roster_slots)
+    need_adjusted = _need_adjusted_price(row, inflated, marginal)
+
+    margin, boost = spend_schedule(board, slot, rows, inflation_map, keepers_by_slot)
+    if me.open_slots > 0:
+        spend_adjusted = _quantize(
+            FLOOR_PRICE + (need_adjusted - FLOOR_PRICE) * margin + boost
+        )
+        max_bid = min(me.max_bid, max(1, math.floor(_quantize(spend_adjusted))))
+    else:
+        spend_adjusted, max_bid = 0.0, 0
+
+    tier = None
+    if not off_sheet:
+        available = [r for r in rows if r.player_id not in keepers]
+        tier = tier_status(player_id, build_tiers(available), sold)
+
+    return PlayerAnalysis(
+        player_id=player_id,
+        name=row.name,
+        position=row.position,
+        rank=row.rank,
+        worth=row.worth,
+        keeper_premium=row.keeper_premium,
+        value=row.value,
+        inflation=inflation,
+        inflation_adjusted=inflated,
+        marginal_worth=marginal,
+        need_bump=_quantize(need_adjusted - inflated),
+        need_adjusted=need_adjusted,
+        spend_margin=margin,
+        spend_boost=boost,
+        spend_adjusted=spend_adjusted,
+        tier=tier,
+        my_cap=me.max_bid,
+        max_bid=max_bid,
+    )
