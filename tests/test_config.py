@@ -58,6 +58,40 @@ def test_cache_dir_anchors_to_the_config_file_folder(tmp_path):
     assert Path(cfg.cache_dir) == tmp_path / "data" / "cache"
 
 
+def test_valuation_tunables_load_from_config(tmp_path):
+    """The [valuation] knobs are data in the TOML; the checked-in file
+    states exactly the decided model constants."""
+    checked_in = load_config(REPO_ROOT / "league_config.toml")
+    assert checked_in.band_ratio == 1.6
+    assert checked_in.min_band_samples == 6
+    assert checked_in.gamma == 0.8
+    assert checked_in.curve_cap is True
+
+    tuned = load_config(
+        _config_copy_in(tmp_path, replace=("gamma = 0.8", "gamma = 0.5"))
+    )
+    assert tuned.gamma == 0.5
+
+
+def test_missing_valuation_section_keeps_identical_defaults(tmp_path):
+    """A TOML with no [valuation] section loads the same numbers the
+    checked-in config states — the section is additive, so configs from
+    before it existed keep pricing identically."""
+    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+    start = next(n for n, line in enumerate(lines) if line.startswith("[valuation]"))
+    end = next(n for n in range(start + 1, len(lines)) if lines[n].startswith("["))
+    config_file = tmp_path / "league_config.toml"
+    config_file.write_text("".join(lines[:start] + lines[end:]), encoding="utf-8")
+
+    stripped = load_config(config_file)
+    checked_in = load_config(REPO_ROOT / "league_config.toml")
+    assert stripped.band_ratio == checked_in.band_ratio
+    assert stripped.min_band_samples == checked_in.min_band_samples
+    assert stripped.gamma == checked_in.gamma
+    assert stripped.curve_cap == checked_in.curve_cap
+
+
 def test_request_timeout_loads_from_config(tmp_path):
     """The HTTP timeout is data in the TOML, tunable without a code change."""
     checked_in = load_config(REPO_ROOT / "league_config.toml")
