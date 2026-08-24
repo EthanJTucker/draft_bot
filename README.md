@@ -36,6 +36,29 @@ also fetch prior seasons' drafts (`get_draft(draft_id=...)` /
 `get_picks(draft_id=...)`); each draft caches under its own id, so
 historical fetches never touch the live draft's fallback cache.
 
+## Value sheet CLI
+
+```
+python -m draftbot.valuesheet
+```
+
+Builds the static pre-draft sheet: the full ranked player pool with, per
+player, projection worth (value over replacement in auction dollars), the
+room price (empirical median of the league's own 2023-25 winning bids in a
+position/ADP band, log-curve fallback only when the band has under six
+samples), and the NPV-adjusted value (worth plus the multi-year keeper
+option at gamma 0.8, priced from the league's own year-over-year price
+transitions with experience recomputed as-of-season and an age-matched
+pool for 8+ year RBs). Writes the CSV where `--out` points (default
+`data/value_sheet_<season>.csv` next to the config, gitignored) and prints
+the top of the board (`--top`, default 30). Two runs over the same cached
+inputs emit byte-identical CSV. Keeper rows hiding in the historical picks
+feeds - flagged `is_keeper`, or unflagged but matching the same-roster
+keeper cost-chain signature - are excluded from the price fit. Exit codes:
+0 sheet written (cache-served endpoints get a warning label), 2 nothing
+produced (bad config path, or an endpoint with neither live data nor
+cache).
+
 ## Tests and lint
 
 ```
