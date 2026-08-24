@@ -29,10 +29,6 @@ from draftbot.tracker import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The 10-second timers are league facts (see GAMEPLAN), not config keys;
-# the demo states them as data for the settings-differ check.
-EXPECTED_TIMERS = {"nomination_timer": 10, "pick_timer": 10}
-
 
 def _player_name(pick: Pick) -> str:
     parts = (pick.metadata.get("first_name"), pick.metadata.get("last_name"))
@@ -210,10 +206,9 @@ def _replay(  # pylint: disable=too-many-arguments  # internal seam between
     stream: TextIO,
 ) -> int:
     source = ReplaySource(raw_draft, raw_picks)
-    tracker = DraftTracker(
-        config,
-        expected_settings=default_expected_settings(config) | EXPECTED_TIMERS,
-    )
+    # The expected settings (type, teams, budget, both timers) all ride in
+    # from the config; the demo adds no literals of its own.
+    tracker = DraftTracker(config, expected_settings=default_expected_settings(config))
 
     board = tracker.update(source.poll())
     print(

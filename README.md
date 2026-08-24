@@ -1,10 +1,11 @@
 # draft_bot
 
-Live auction assistant for a 12-team Sleeper keeper league. This slice is the
-IO boundary: a read-only Sleeper API client with an on-disk cache, clean parsed
-types for picks and draft state, and a snapshot CLI. Valuation, live draft
-tracking, and the dashboard come in later slices. The decision record lives in
-GAMEPLAN.md, PRD.md, and RESEARCH.md.
+Live auction assistant for a 12-team Sleeper keeper league. Built so far: a
+read-only Sleeper API client with an on-disk cache, clean parsed types for
+picks and draft state, a snapshot CLI, the static value sheet (room prices,
+projection worth, keeper NPV), and live draft tracking with a replay demo.
+The backtest report and the dashboard are the later slices. The decision
+record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
 
 ## Setup
 
@@ -98,6 +99,55 @@ board every `--table-every` sales) and verifies each team's final spend
 against the 2025 draft object's own `budget_<slot>`. Exit codes: 0
 verified, 1 a team overspent its budget, 2 config or fetch failure.
 Options: `--year`, `--config`, `--cache-dir`, `--table-every`.
+
+## Repricing engine
+
+`draftbot/draft_engine.py` turns the value sheet plus the live board into
+a max bid for a nominated player. `analyze_player(player_id, rows, board,
+config)` is a pure function - no stored state, no clock, no network - so
+the replay backtest can ask for the engine's number on the board as it
+stood before any historical sale folded in (the seam contract: price the
+nominee pre-sale, never on a board that already contains his own sale)
+and the dashboard only renders the returned record. The record carries
+every number the top bar shows: sheet worth, keeper premium, and value;
+the position's inflation ratio and the inflation-adjusted price;
+marginal lineup worth and the need bump; the spend margin and boost;
+tier status; my team's max-bid cap; and the final whole-dollar max bid.
+Two guardrails: a board that shows kept players refuses to price without
+`keepers_by_slot` (silently mispricing a keeper board is worse than
+stopping), and an off-sheet nominee stays at the $1 floor - the pace
+boost never burns surplus into players the model does not price.
+
+The layers, in order:
+
+- Positional inflation: each position is budgeted its share of the
+  room's initial discretionary money (actual keeper-reduced budgets,
+  never the sheet's normalization room) by its share of the pool;
+  on-model sales debit it dollar for dollar above the floor, and the
+  ratio divides by the remaining pool. Off-model sales debit no
+  position's money; a sale of a player the sheet does not price touches
+  nothing else either, while a board-flagged sale of a player the sheet
+  does price (a defensive path, unreachable when tracker and engine
+  share one sheet) still removes that value from the remaining pool -
+  sold is sold - so the ratio can move. Kept players never enter a
+  pool, and the multiplier tapers to zero past roughly the 130th player
+  so the $1-5 tail holds its price.
+- Marginal roster need: best legal starting lineup with the player minus
+  without, FLEX included. A discount schedule, never a premium: a
+  scarce starter keeps the full inflation-adjusted price, a redundant
+  player is discounted toward bench retention, and the bump is never
+  positive - scarcity pressure comes from inflation, the spend
+  schedule, and the last-of-tier flag, so a roster-side bump on top
+  would double-count. A third QB adds nothing and prices at bench
+  retention; an upgrade adds only its edge over the incumbent; the
+  keeper premium is never need-discounted.
+- Spend-down schedule: max bids start under value at money parity and
+  rise as my money-per-open-slot outpaces the room's, plus a pace-boost
+  that burns money the remaining pool can no longer absorb. A simulated
+  180-lot auction in the tests must finish with a full roster and no
+  meaningful unspent cash.
+- Gap-based tiers per position, with remaining-in-tier counts and a
+  last-of-tier flag that fires exactly on the final remaining member.
 
 ## Tests and lint
 

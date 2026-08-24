@@ -65,11 +65,9 @@ def _source() -> ReplaySource:
 
 
 def _tracker(config) -> DraftTracker:
-    expected = default_expected_settings(config) | {
-        "nomination_timer": 10,
-        "pick_timer": 10,
-    }
-    return DraftTracker(config, expected_settings=expected)
+    # Timer expectations included: they ride in from the config's
+    # [auction] keys, not from literals merged here.
+    return DraftTracker(config, expected_settings=default_expected_settings(config))
 
 
 def test_2025_replay_reaches_every_teams_exact_final_dollars(config):

@@ -16,6 +16,10 @@ teams = 12
 
 [auction]
 budget = 200
+# Expected draft timers in seconds (league facts, GAMEPLAN.md); the
+# settings-differ banner fires when the live draft contradicts them.
+nomination_timer = 10
+pick_timer = 10
 
 # Drafted roster shape: 15 drafted slots (IR is extra, not drafted).
 [roster]

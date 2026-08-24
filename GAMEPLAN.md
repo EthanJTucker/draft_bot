@@ -65,7 +65,10 @@ draftbot/keeper.py in v2).
 2. **Positional inflation**: remaining money / remaining value per position,
    recomputed every pick.
 3. **Marginal roster need**: value = best lineup with the player minus best
-   lineup without him (a 3rd RB is bench value; scarce QB gets a bump).
+   lineup without him (a 3rd RB is bench value; a scarce starter keeps the
+   full inflation-adjusted price, never a positive bump: scarcity prices
+   through inflation, the spend schedule, and the last-of-tier flag; knob
+   reframed as discount-only during adversarial review, see issue #5).
 4. **Multi-year keeper NPV, gamma = 0.8**:
    `bid = now_value + 0.8*E[max(0, V1-(p+2))] + 0.64*E[max(0, V2-(p+4))]`,
    where the V distributions come from the league's own year-to-year price
