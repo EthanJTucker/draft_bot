@@ -74,6 +74,40 @@ def test_replay_demo_flags_an_overspending_team(tmp_path):
     assert "[OVERSPENT]" in printed
 
 
+def test_replay_demo_reads_timer_expectations_from_config(tmp_path):
+    """The expected timers are config data, not demo literals: a config
+    expecting a 60-second pick timer must banner the fixture's real
+    10-second timer as a mismatch (and the checked-in 10s config must not).
+    Kills the hardcoded-timer mutant: a demo that states 10s in code shows
+    a clean board no matter what the config says."""
+    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    config_file = tmp_path / "league_config.toml"
+    config_file.write_text(
+        text.replace("pick_timer = 10", "pick_timer = 60"), encoding="utf-8"
+    )
+    out = io.StringIO()
+    exit_code = main(
+        [
+            "--config",
+            str(config_file),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+        ],
+        http_get=_transport(_fixture()),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+    printed = out.getvalue()
+
+    assert exit_code == 0
+    assert "settings differ: pick_timer" in printed
+    assert "expected 60" in printed
+
+    # The checked-in config's 10-second expectations stay warning-free.
+    _, clean = _run(_transport(_fixture()), tmp_path)
+    assert "settings differ" not in clean
+
+
 def test_replay_demo_with_missing_config_exits_cleanly(tmp_path):
     """A bad --config path exits 2 with a message, not a traceback."""
     out = io.StringIO()

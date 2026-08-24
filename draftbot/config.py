@@ -21,6 +21,12 @@ DEFAULT_CACHE_DIR = "data/cache"
 DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS = 86400
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 
+# The league's 10-second nomination and bid timers (GAMEPLAN.md): stated in
+# the [auction] section of league_config.toml; these are the fallbacks for
+# configs written before the keys existed.
+DEFAULT_NOMINATION_TIMER_SECONDS = 10
+DEFAULT_PICK_TIMER_SECONDS = 10
+
 # Valuation-model tunables (the decided values from GAMEPLAN.md; the
 # [valuation] section of league_config.toml states them explicitly, and
 # draftbot/valuation.py aliases these as its module defaults so config
@@ -56,6 +62,11 @@ class LeagueConfig:
     cache_dir: str = DEFAULT_CACHE_DIR
     player_map_max_age_seconds: int = DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    # Expected draft timers in seconds for the settings-differ check
+    # ([auction] in the TOML, same key names as Sleeper's settings; defaults
+    # keep configs written before the keys existed on the league's facts).
+    nomination_timer: int = DEFAULT_NOMINATION_TIMER_SECONDS
+    pick_timer: int = DEFAULT_PICK_TIMER_SECONDS
     # Valuation tunables ([valuation] in the TOML; defaults keep pricing
     # identical for configs written before the section existed).
     band_ratio: float = DEFAULT_BAND_RATIO
@@ -90,6 +101,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
     with open(path, "rb") as handle:
         raw = tomllib.load(handle)
     league = raw["league"]
+    auction = raw["auction"]
     keeper = raw["keeper"]
     me = raw["me"]
     cache = raw.get("cache", {})
@@ -102,7 +114,11 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
         league_id=league["league_id"],
         draft_id=league["draft_id"],
         teams=league["teams"],
-        auction_budget=raw["auction"]["budget"],
+        auction_budget=auction["budget"],
+        nomination_timer=auction.get(
+            "nomination_timer", DEFAULT_NOMINATION_TIMER_SECONDS
+        ),
+        pick_timer=auction.get("pick_timer", DEFAULT_PICK_TIMER_SECONDS),
         roster_slots=dict(raw["roster"]),
         keeper_cost_increment=keeper["cost_increment"],
         keeper_cost_floor=keeper["cost_floor"],

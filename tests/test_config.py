@@ -92,6 +92,37 @@ def test_missing_valuation_section_keeps_identical_defaults(tmp_path):
     assert stripped.curve_cap == checked_in.curve_cap
 
 
+def test_expected_draft_timers_load_from_config(tmp_path):
+    """The 10-second nomination and bid timers are league facts stated in
+    the TOML, not literals buried in whichever module checks them."""
+    checked_in = load_config(REPO_ROOT / "league_config.toml")
+    assert checked_in.nomination_timer == 10
+    assert checked_in.pick_timer == 10
+
+    tuned = load_config(
+        _config_copy_in(tmp_path, replace=("pick_timer = 10", "pick_timer = 60"))
+    )
+    assert tuned.pick_timer == 60
+    assert tuned.nomination_timer == 10
+
+
+def test_missing_timer_keys_keep_the_league_defaults(tmp_path):
+    """A config written before the timer keys existed keeps the league's
+    10-second expectations rather than crashing or expecting nothing."""
+    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    lines = [
+        line
+        for line in text.splitlines(keepends=True)
+        if not line.startswith(("nomination_timer", "pick_timer"))
+    ]
+    config_file = tmp_path / "league_config.toml"
+    config_file.write_text("".join(lines), encoding="utf-8")
+
+    stripped = load_config(config_file)
+    assert stripped.nomination_timer == 10
+    assert stripped.pick_timer == 10
+
+
 def test_request_timeout_loads_from_config(tmp_path):
     """The HTTP timeout is data in the TOML, tunable without a code change."""
     checked_in = load_config(REPO_ROOT / "league_config.toml")

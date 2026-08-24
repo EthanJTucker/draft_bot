@@ -1,10 +1,11 @@
 # draft_bot
 
-Live auction assistant for a 12-team Sleeper keeper league. This slice is the
-IO boundary: a read-only Sleeper API client with an on-disk cache, clean parsed
-types for picks and draft state, and a snapshot CLI. Valuation, live draft
-tracking, and the dashboard come in later slices. The decision record lives in
-GAMEPLAN.md, PRD.md, and RESEARCH.md.
+Live auction assistant for a 12-team Sleeper keeper league. Built so far: a
+read-only Sleeper API client with an on-disk cache, clean parsed types for
+picks and draft state, a snapshot CLI, the static value sheet (room prices,
+projection worth, keeper NPV), and live draft tracking with a replay demo.
+The backtest report and the dashboard are the later slices. The decision
+record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
 
 ## Setup
 

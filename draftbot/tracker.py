@@ -101,13 +101,16 @@ class SettingsMismatch:
 def default_expected_settings(config: LeagueConfig) -> dict[str, object]:
     """The assumptions the config encodes, in ``diff_settings`` form.
 
-    Timer expectations are league facts, not config keys, so callers add
-    them as data (e.g. ``{"nomination_timer": 10, "pick_timer": 10}``).
+    The timer expectations come from the config's ``[auction]`` keys (the
+    keys carry Sleeper's own settings names), so every consumer states the
+    same league facts without merging literals by hand.
     """
     return {
         "type": "auction",
         "teams": config.teams,
         "budget": config.auction_budget,
+        "nomination_timer": config.nomination_timer,
+        "pick_timer": config.pick_timer,
     }
 
 

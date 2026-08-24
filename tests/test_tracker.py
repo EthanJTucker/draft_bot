@@ -278,11 +278,10 @@ def test_empty_pre_draft_feed_still_allows_the_first_nomination(config):
 def test_settings_diff_catches_a_timer_mismatch_not_just_budget(config):
     """Anti-cheat: budget, teams, and type all match here; only the
     nomination timer differs. A diff that only checks the budget shows a
-    clean board for a draft whose timers changed under us."""
-    expected = default_expected_settings(config) | {
-        "nomination_timer": 10,
-        "pick_timer": 10,
-    }
+    clean board for a draft whose timers changed under us. The timer
+    expectations ride in from the config's [auction] keys — no caller
+    merges them by hand anymore."""
+    expected = default_expected_settings(config)
     tracker = DraftTracker(config, expected_settings=expected)
     board = tracker.update(_tick(settings={"nomination_timer": 15, "pick_timer": 10}))
 
@@ -298,7 +297,15 @@ def test_settings_diff_flags_type_teams_and_budget(config):
     expected = default_expected_settings(config)
     tracker = DraftTracker(config, expected_settings=expected)
     board = tracker.update(
-        _tick(draft_type="snake", settings={"teams": 10, "budget": 300})
+        _tick(
+            draft_type="snake",
+            settings={
+                "teams": 10,
+                "budget": 300,
+                "nomination_timer": 10,
+                "pick_timer": 10,
+            },
+        )
     )
 
     by_field = {warning.field: warning for warning in board.settings_warnings}
@@ -310,9 +317,9 @@ def test_settings_diff_flags_type_teams_and_budget(config):
 
 def test_matching_settings_produce_no_warnings(config):
     """A clean board stays clean: warnings only exist to be believed."""
-    expected = default_expected_settings(config) | {"nomination_timer": 10}
+    expected = default_expected_settings(config)
     tracker = DraftTracker(config, expected_settings=expected)
-    board = tracker.update(_tick(settings={"nomination_timer": 10}))
+    board = tracker.update(_tick(settings={"nomination_timer": 10, "pick_timer": 10}))
     assert not board.settings_warnings
 
 
