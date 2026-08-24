@@ -52,11 +52,14 @@ the config default until then, labeled as defaulted), spend, open slots,
 positional needs, and max possible bid (remaining budget minus $1 for
 every other open slot). Its guards: a nominee already in the sold set
 never renders as live (Sleeper's nomination pointer keeps naming the
-just-sold winner until the next lot opens), settings mismatches (type,
-teams, budget, timers, keeper budgets not yet entered) surface as
-warnings, a paused draft never reads as an expired timer, and sales absent
-from an optionally injected value sheet are flagged off-model for the
-inflation math to exclude while still debiting the buying team's budget.
+just-sold winner until the next lot opens), a degraded or regressed picks
+feed never rules a lot live either (the sold set could be missing a
+recent sale, so the nomination shows as `untrusted` instead), settings
+mismatches (type, teams, budget, timers, keeper budgets missing for any
+keeper team) surface as warnings, a paused draft never reads as an
+expired timer, and sales absent from an optionally injected value sheet
+are flagged off-model for the inflation math to exclude while still
+debiting the buying team's budget.
 
 ```
 python -m draftbot.trackdemo

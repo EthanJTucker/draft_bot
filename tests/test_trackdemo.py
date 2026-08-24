@@ -50,7 +50,7 @@ def test_replay_demo_prints_per_pick_state_and_verified_final_budgets(tmp_path):
     exit_code, printed = _run(_transport(_fixture()), tmp_path)
 
     assert exit_code == 0
-    # Pick 1 is real: Amon-Ra St. Brown to slot 3 for $51.
+    # Pick 1 is real: Amon-Ra St. Brown to slot 5 for $51.
     assert "St. Brown" in printed
     assert "$51" in printed
     assert "180 sales" in printed

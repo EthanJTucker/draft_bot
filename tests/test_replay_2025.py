@@ -2,7 +2,16 @@
 
 The fixture is the live 2025 draft (id 1257407146123857920) reduced to the
 fields the models parse, fetched once on 2026-08-23; every dollar below is
-real. Four teams finished with money unspent — an auction does not force
+real. Beyond dropping unparsed fields, the fixture makes two deliberate
+VALUE reductions from the real feed: (a) ``picked_by`` is blanked to ""
+on all 180 picks (the real feed carries the winner's user id; blanking it
+is an anti-cheat against attributing purchases by ``picked_by`` instead
+of ``draft_slot``), and (b) ``draft.metadata`` is emptied (the real
+completed object still carries the stale nomination pointer at the last
+sale — the replay source re-synthesizes that pointer per tick, so the
+guard is still exercised on all 180 of them).
+
+Four teams finished with money unspent — an auction does not force
 spend-down — so instead of assuming spent == budget the checks pin each
 team's EXACT final spend and leftover against the draft object's own
 ``budget_<slot>`` values, which is strictly stronger.
@@ -79,6 +88,12 @@ def test_2025_replay_reaches_every_teams_exact_final_dollars(config):
 
     assert polls == 181  # the empty opening tick plus one per sale
     assert sum(team.purchase_count for team in board.teams) == 180
+    # The board's own sale list carries the full ledger: 180 sales whose
+    # dollars sum to exactly the money the twelve teams spent.
+    assert len(board.sales) == 180
+    assert sum(sale.amount or 0 for sale in board.sales) == sum(
+        team.spent for team in board.teams
+    )
     for slot, budget in BUDGETS_2025.items():
         team = board.team(slot)
         leftover = LEFTOVER_2025.get(slot, 0)
@@ -112,3 +127,8 @@ def test_2025_replay_never_shows_a_sold_nominee_as_live(config):
         assert nomination.player_id is not None
         assert nomination.is_live is False
         assert nomination.status == "sold_between_lots"
+        # Honest replay synthesis on every tick: the winner IS the high
+        # bidder at the hammer (offering_slot), and the nominator is
+        # unknowable from the picks feed (never fabricated).
+        assert nomination.offering_slot == board.sales[-1].draft_slot
+        assert nomination.nominating_slot is None
