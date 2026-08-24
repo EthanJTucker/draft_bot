@@ -162,3 +162,26 @@ Unit tests never touch the live network. The client's transport is injectable,
 and the suite includes traps for Sleeper's known gotchas: CDN cache-busting on
 every poll, bid amounts arriving as strings, purchase attribution by draft
 slot, and the pause flag freezing the draft timer.
+
+## Backtest
+
+```
+python -m draftbot.backtest
+```
+
+Replays the real 2025 auction (committed fixtures, fully offline) through
+the tracker and the repricing engine, pricing every nominee on the board
+as it stood before his own sale folded in, and rewrites
+`reports/backtest_2025.md`: overall and per-position MAE and bias for the
+engine's running (inflation-adjusted) estimate and for the static sheet
+price, an early/mid/late drift comparison, the off-model (K/DEF)
+exclusions, and the measured-first bounds the pytest gate asserts. The
+sheet is honest - room prices fit on the 2023-2024 bids only, applied to
+2025 preseason ADP - and the suite regenerates the report byte-for-byte,
+so the committed copy can never drift from the code. The replay is also
+the dashboard's offline data source: build the sheet with
+`draftbot.backtest.build_history_price_sheet`, then drive `ReplaySource`
+through `DraftTracker` and price each nominee with `analyze_player` on
+the pre-sale board, exactly as `draftbot.backtest.replay_records` does
+(its docstring is the reference). Options: `--config`, `--history`,
+`--draft`, `--season`, `--out`.
