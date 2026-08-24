@@ -52,11 +52,12 @@ from pathlib import Path
 from typing import TextIO
 
 from draftbot.config import LeagueConfig, load_config
-from draftbot.draft_engine import analyze_player
+from draftbot.draft_engine import INFLATION_MIN, analyze_player, taper_weight
 from draftbot.models import parse_picks
 from draftbot.sources import ReplaySource
 from draftbot.tracker import DraftTracker, default_expected_settings
 from draftbot.valuation import (
+    FLOOR_PRICE,
     PriceModel,
     SheetRow,
     build_bids,
@@ -231,7 +232,7 @@ class BacktestRecord:
     position: str | None  # None for an off-sheet nominee
     actual: int  # the winning bid
     running: float  # PlayerAnalysis.inflation_adjusted
-    static: float  # the sheet price, no draft-state adjustment
+    static: float  # the sheet price (0.0 on an off-model lot: unscored)
     max_bid: int  # the engine's bid ceiling (policy, not prediction)
     inflation: float  # the position's inflation ratio at the sale moment
     off_model: bool  # the sheet does not price this player
@@ -304,7 +305,10 @@ def replay_records(
                 position=analysis.position or feed_positions.get(sale.player_id),
                 actual=sale.amount or 0,
                 running=analysis.inflation_adjusted,
-                static=static.get(sale.player_id, analysis.worth),
+                # An off-model lot has no sheet price: an explicit 0.0
+                # (never scored, never printed), not a live-looking
+                # fallback to the engine's off-sheet worth.
+                static=static.get(sale.player_id, 0.0),
                 max_bid=analysis.max_bid,
                 inflation=analysis.inflation,
                 off_model=analysis.rank is None,
@@ -442,6 +446,15 @@ def _segment_table(
     return _table(header, body)
 
 
+def _overall_row(records: Sequence[BacktestRecord], estimate: str) -> str:
+    """An overall row closing a segment table: the same statistic over
+    every scored lot, so a reader can check the report against the
+    overall number the PR and the summary line quote."""
+    stats = overall_stats(records, estimate)
+    span = f"{records[0].lot}-{records[-1].lot}"
+    return f"| overall | {span} | {stats.n} | {stats.mae:.2f} | {stats.bias:+.2f} |"
+
+
 def _report_intro(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -> str:
     scored = scored_records(records)
     excluded = off_model_records(records)
@@ -464,9 +477,12 @@ paid.
 Method, in five rules:
 
 - **Honest sheet.** Room prices are fit on the 2023-2024 winning bids
-  only (unflagged keeper rows detected and excluded) and applied to 2025
-  preseason ADP: nothing the bot could not have known on 2025 draft
-  night. The sheet prices {len(rows)} players ({source_note}).
+  only (the unflagged-keeper detection path runs on the fit and finds
+  none in 2023-2024; the exclusion wiring itself is pinned by test on
+  a 2025-inclusive fit) and applied to 2025 preseason ADP — the
+  post-preseason snapshot, approximately draft-morning: nothing the
+  bot could not have known on 2025 draft night. The sheet prices
+  {len(rows)} players ({source_note}).
   The keeper premium is deliberately zero: the empirical fit already
   contains the room's keeper appetite, and stacking the model's premium
   on top would double-count it in a market estimate.
@@ -489,13 +505,19 @@ Method, in five rules:
 """
 
 
-def _report_finding(records: Sequence[BacktestRecord]) -> str:
+def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -> str:
     scored = scored_records(records)
     run = overall_stats(records, "running")
     static = overall_stats(records, "static")
     early, mid, late = segment_stats(records, "running")
-    low = min(record.inflation for record in scored)
     high = max(record.inflation for record in scored)
+    clamped = sum(1 for record in scored if record.inflation == INFLATION_MIN)
+    sold = {record.player_id for record in records}
+    unsold = sum(
+        taper_weight(row.rank) * max(0.0, row.worth - FLOOR_PRICE)
+        for row in rows
+        if row.player_id not in sold
+    )
     return f"""## Finding: the running estimate deflates the early board
 
 The calibration lives in the static sheet: MAE {static.mae:.2f}, bias
@@ -503,26 +525,38 @@ The calibration lives in the static sheet: MAE {static.mae:.2f}, bias
 prices to within about two dollars a lot, with no meaningful drift
 (segment table above). The running estimate then multiplies that sheet
 by remaining-money-over-remaining-value per position, and that ratio
-opens far below par (inflation spans {low:.2f}-{high:.2f} across the
-replay, never reaching 1.0): the engine's denominator counts EVERY
-unsold sheet row as competing for the room's money, but an auction only
-absorbs 180 lots — the sheet's priced pool carries roughly a room's
-worth of value that nobody will ever buy. The result is a deflation
-drift with a fixed shape: the early board runs {early.stats.bias:+.2f}
-per lot while the taper-protected tail holds sticker, the gap fades as
-the overhang clears ({mid.stats.bias:+.2f} mid), and the late board
-prices on the money ({late.stats.bias:+.2f}). Overall the running
-estimate scores MAE {run.mae:.2f}, bias {run.bias:+.2f} — strictly worse
-than the static sheet it adjusts, on this fixture.
+opens at {high:.3f} and only falls: the engine's denominator counts
+EVERY unsold sheet row as competing for the room's money, but an
+auction only absorbs 180 lots. The overhang never clears — when the
+last lot closes, ${unsold:.0f} of taper-weighted above-floor sheet
+value is still unsold against the $1464 of discretionary money the
+room started with (the twelve 2025 budgets minus the $1 every roster
+slot pins), so about 76% of a room's money worth of priced value never
+sells. RB and WR fall to {INFLATION_MIN:.2f} before the opening third
+is out and never leave it — and {INFLATION_MIN:.2f} is the engine's
+INFLATION_MIN clamp, not a market reading; the raw ratio would keep
+falling without it. {clamped} of the {run.n} scored lots price at
+exactly that clamp. The resulting drift: the early board runs
+{early.stats.bias:+.2f} per lot, and the bias then shrinks
+({mid.stats.bias:+.2f} mid, {late.stats.bias:+.2f} late) NOT because
+the ratio recovers — it never does — but because mid and late lots
+carry too little taper-weighted above-floor worth for a wrong ratio to
+move. Overall the running estimate scores MAE {run.mae:.2f}, bias
+{run.bias:+.2f} — strictly worse than the static sheet it adjusts, on
+this fixture.
 
 The shape is not an artifact of the sheet's normalization basis:
 rescaling the sheet's above-floor prices so the engine's
 worth-normalization contract holds exactly, or cutting the pool to the
-top 180, reproduces the same early-deep, late-flat drift within a
-fraction of a dollar (measured during development against the same
-fixtures). Draft-night reading: trust the static column and the late
-board; treat the early-board running estimate as a floor, not a fair
-price, whenever the room's budgets are far below the sheet's pool
+top 180, reproduced the same early-deep, late-flat drift within a
+fraction of a dollar. (Development measurements against the same
+fixtures: neither variant is regenerated by this report or pinned by
+the suite.) Draft-night reading: trust the static column for any
+expensive lot after the opening stretch — the clean late-board numbers
+above reflect 2025's cheap tail, not a recovered ratio, and an
+expensive nominee arriving late would still be deflated — and on the
+opening stretch itself treat the running estimate as a floor, not a
+fair price, whenever the room's budgets sit far below the sheet's pool
 value.
 """
 
@@ -630,7 +664,7 @@ def render_report(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -
         f"Running bias spread: {drift_spread(segment_stats(records, 'running')):.2f}."
         f" Static bias spread: {drift_spread(segment_stats(records, 'static')):.2f}.",
         "",
-        _report_finding(records),
+        _report_finding(records, rows),
         "## Worst running misses",
         "",
         *_table(
@@ -675,6 +709,7 @@ def render_report(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -
         "thinks the room will pay. Shown for completeness only:",
         "",
         *_segment_table(records, (("max_bid", "max bid"),)),
+        _overall_row(records, "max_bid"),
         "",
         "## Reproducing",
         "",
@@ -730,7 +765,9 @@ def main(argv: list[str] | None = None, out: TextIO | None = None) -> int:
     """Build the sheet, replay the draft, write the report.
 
     ``out`` is injectable for tests. Exit codes: 0 report written; 2
-    nothing produced (missing or unparseable config or fixture).
+    nothing produced (missing or unparseable config or fixture, or a
+    replay in which the sheet prices no sale at all — statistics over
+    zero scored lots are undefined, not zero).
     """
     args = _parse_args(argv)
     stream = out if out is not None else sys.stdout
@@ -748,6 +785,12 @@ def main(argv: list[str] | None = None, out: TextIO | None = None) -> int:
 
     rows = build_history_price_sheet(history, config, season=args.season)
     records = replay_records(data["draft"], data["picks"], rows, config)
+    if not scored_records(records):
+        print(
+            "error: no scored lots: the sheet prices none of the replayed sales",
+            file=err,
+        )
+        return 2
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # newline="\n" keeps the committed artifact byte-stable across

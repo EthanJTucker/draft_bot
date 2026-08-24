@@ -165,9 +165,12 @@ class TestGateBounds:
         running estimate provably deflates the early board (measured
         segment bias -11.81 early, -2.69 mid, -0.02 late; spread 11.7962,
         pinned at 13.00 with a $1.50 margin) because the remaining-pool
-        denominator carries sheet value the room never buys. The shape is
-        pinned too: the deflation must fade monotonically as the pool
-        empties, and the late board must price nearly on the money."""
+        denominator carries sheet value the room never buys — an
+        overhang that never clears. The shape is pinned too: the bias
+        must shrink monotonically across the segments (late lots carry
+        too little taper-weighted worth for the wrong ratio to move,
+        NOT a recovering ratio), and the late board must price nearly
+        on the money."""
         segments = segment_stats(replay["records"], "running")
         spread = drift_spread(segments)
         assert spread <= RUNNING_DRIFT_SPREAD_BOUND
@@ -222,6 +225,7 @@ class TestReport:
             "## Early/mid/late drift",
             "## Off-model lots",
             "## The pytest gate",
+            "| overall |",
             "| QB |",
             "| RB |",
             "| WR |",
@@ -266,3 +270,19 @@ class TestReport:
         missing = tmp_path / "nope.json"
         assert main(["--history", str(missing)], out=stream) == 2
         assert "error" in stream.getvalue()
+
+    def test_cli_fails_cleanly_when_no_lot_is_scored(self, tmp_path):
+        """A custom ``--draft`` whose replay scores nothing (here: an
+        empty picks feed) is exit code 2 and a message — never a
+        ZeroDivisionError from statistics over zero scored lots — and
+        no report is written."""
+        data = json.loads(DRAFT_FIXTURE.read_text(encoding="utf-8"))
+        data["picks"] = []
+        draft_path = tmp_path / "empty_draft.json"
+        draft_path.write_text(json.dumps(data), encoding="utf-8")
+        out_path = tmp_path / "report.md"
+        stream = io.StringIO()
+        args = ["--draft", str(draft_path), "--out", str(out_path)]
+        assert main(args, out=stream) == 2
+        assert "no scored lots" in stream.getvalue()
+        assert not out_path.exists()
