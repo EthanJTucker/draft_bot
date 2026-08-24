@@ -100,6 +100,40 @@ against the 2025 draft object's own `budget_<slot>`. Exit codes: 0
 verified, 1 a team overspent its budget, 2 config or fetch failure.
 Options: `--year`, `--config`, `--cache-dir`, `--table-every`.
 
+## Repricing engine
+
+`draftbot/draft_engine.py` turns the value sheet plus the live board into
+a max bid for a nominated player. `analyze_player(player_id, rows, board,
+config)` is a pure function - no stored state, no clock, no network - so
+the replay backtest can ask for the engine's number at the moment of any
+historical sale and the dashboard only renders the returned record. The
+record carries every number the top bar shows: sheet worth, keeper
+premium, and value; the position's inflation ratio and the
+inflation-adjusted price; marginal lineup worth and the need bump; the
+spend margin and boost; tier status; my team's max-bid cap; and the
+final whole-dollar max bid.
+
+The layers, in order:
+
+- Positional inflation: each position is budgeted its share of the
+  room's initial discretionary money (actual keeper-reduced budgets,
+  never the sheet's normalization room) by its share of the pool;
+  on-model sales debit it dollar for dollar above the floor, and the
+  ratio divides by the remaining pool. Off-model sales touch neither
+  side, kept players never enter a pool, and the multiplier tapers to
+  zero past roughly the 130th player so the $1-5 tail holds its price.
+- Marginal roster need: best legal starting lineup with the player minus
+  without, FLEX included. A third QB adds nothing and prices at bench
+  retention; an upgrade adds only its edge over the incumbent; the
+  keeper premium is never need-discounted.
+- Spend-down schedule: max bids start under value at money parity and
+  rise as my money-per-open-slot outpaces the room's, plus a pace-boost
+  that burns money the remaining pool can no longer absorb. A simulated
+  180-lot auction in the tests must finish with a full roster and no
+  meaningful unspent cash.
+- Gap-based tiers per position, with remaining-in-tier counts and a
+  last-of-tier flag that fires exactly on the final remaining member.
+
 ## Tests and lint
 
 ```
