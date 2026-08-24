@@ -1,0 +1,346 @@
+"""The dashboard poller: one poll cycle in, one JSON-ready snapshot out.
+
+Every test drives the public seam (``DashboardPoller.step`` /
+``.snapshot``) with scripted sources — no network, no wall clock, no
+FastAPI. The fixtures are anti-cheat by construction: budgets where spent
+and remaining differ, verdicts at exact bid-equality, profit with an
+asymmetric sign, and boards that a fail-open renderer would misread.
+"""
+
+from __future__ import annotations
+
+from draftbot.sleeper_client import SleeperUnavailableError
+from draftbot.tracker import DraftTracker
+
+from .conftest import raw_auction_pick
+from .helpers_dashboard import make_poller, make_tick, team_by_slot
+from .helpers_engine import sheet_row
+
+
+def test_budgets_render_as_remaining_never_spent(config):
+    """A team that spent $37 of $200 must show $163 — the remaining figure —
+    with open slots and the max possible bid; the snapshot carries no
+    'spent' key at all, so a page cannot even bind the wrong number."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "RB", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick([raw_auction_pick(1, "A", 3, "37")])]
+    state = make_poller(config, entries, rows).step()
+
+    team = team_by_slot(state, 3)
+    assert team["remaining"] == 163
+    assert team["open_slots"] == 14
+    assert team["max_bid"] == 163 - 13  # $1 held for every OTHER open slot
+    assert "spent" not in team
+    assert team_by_slot(state, 1)["remaining"] == 200
+    assert team_by_slot(state, 7)["is_me"] is True  # roster 7 -> slot 7 here
+    assert team_by_slot(state, 3)["is_me"] is False
+
+
+def test_remaining_players_exclude_sold_and_sales_are_listed(config):
+    """The positional table only offers players still buyable; the sale
+    ledger carries the sold player with his hammer price and buying slot."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0, name="Big Wideout"),
+        sheet_row(2, "B", "RB", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick([raw_auction_pick(1, "A", 3, "37")])]
+    state = make_poller(config, entries, rows).step()
+
+    assert [player["player_id"] for player in state["players"]] == ["B", "C"]
+    assert state["sales"] == [
+        {
+            "player_id": "A",
+            "name": "Big Wideout",
+            "position": "WR",
+            "amount": 37,
+            "slot": 3,
+        }
+    ]
+    assert state["ok"] is True
+    assert state["poll_count"] == 1
+
+
+def test_new_nomination_is_visible_in_the_next_snapshot(config):
+    """The latency criterion: a nomination that appears in the source is in
+    the very next snapshot — live status, priced analysis, and a verdict."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [
+        make_tick(),
+        make_tick(nominee="B", offer=5, nominating_slot=2, offering_slot=4),
+    ]
+    poller = make_poller(config, entries, rows)
+
+    first = poller.step()
+    assert first["nomination"]["status"] == "none"
+    assert first["nomination"]["verdict"] is None
+
+    second = poller.step()
+    nomination = second["nomination"]
+    assert nomination["status"] == "live"
+    assert nomination["is_live"] is True
+    assert nomination["player_id"] == "B"
+    assert nomination["name"] == "B"
+    assert nomination["high_bid"] == 5
+    assert nomination["nominating_slot"] == 2
+    assert nomination["offering_slot"] == 4
+    assert nomination["analysis"] is not None
+    assert isinstance(nomination["analysis"]["max_bid"], int)
+    assert nomination["analysis"]["worth"] == 20.0
+    assert nomination["verdict"] is not None
+    assert nomination["verdict"]["action"] in {"BID", "PASS"}
+
+
+def test_bid_only_below_max_bid_equality_is_pass(config):
+    """At high bid == my max bid I can only match, never beat: that is
+    PASS with margin 0. One dollar below is BID with margin 1. Kills the
+    off-by-one (<=) mutant exactly at the boundary."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+
+    def nomination_at(offer):
+        entries = [make_tick(nominee="B", offer=offer)]
+        return make_poller(config, entries, rows).step()["nomination"]
+
+    # The engine's max bid is a function of the board, not the offer, so
+    # discover it once and replay the exact boundary offers against it.
+    max_bid = nomination_at(1)["analysis"]["max_bid"]
+    assert max_bid > 2  # fixture guard: the boundary probes are distinct
+
+    at_equality = nomination_at(max_bid)
+    assert at_equality["verdict"]["action"] == "PASS"
+    assert at_equality["verdict"]["margin"] == 0
+
+    one_below = nomination_at(max_bid - 1)
+    assert one_below["verdict"]["action"] == "BID"
+    assert one_below["verdict"]["margin"] == 1
+
+
+def test_profit_is_price_minus_value_signed(config):
+    """The decided sign convention: profit = current price MINUS value,
+    centered at $0. A $13 bid on a $20 player reads -7 (under value); a
+    $27 bid reads +7. The asymmetric fixture kills the flipped-sign
+    (value-minus-price) mutant on both sides."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+
+    def profit_at(offer):
+        entries = [make_tick(nominee="B", offer=offer)]
+        return make_poller(config, entries, rows).step()["nomination"]["profit"]
+
+    assert profit_at(13) == -7.0
+    assert profit_at(27) == 7.0
+    assert profit_at(20) == 0.0
+
+
+def test_untrusted_nomination_never_carries_a_verdict(config):
+    """A stale picks feed cannot prove the lot is open, so the nomination
+    renders UNTRUSTED and the verdict is suppressed — even at a $1 offer
+    that would scream BID on a trusted board (the fail-open mutant)."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick(nominee="B", offer=1, stale=("picks",))]
+    state = make_poller(config, entries, rows).step()
+
+    nomination = state["nomination"]
+    assert nomination["status"] == "untrusted"
+    assert nomination["is_live"] is False
+    assert nomination["verdict"] is None
+    assert "untrusted" in nomination["verdict_reason"]
+    assert state["stale_endpoints"] == ["picks"]
+    # The board data itself still renders: values, budgets, the table.
+    assert state["teams"]
+    assert state["players"]
+
+
+def test_paused_draft_never_carries_a_verdict(config):
+    """Sleeper's overnight auto-pause freezes the lot; advising into a
+    paused draft is the same fail-open bug in a different coat."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick(nominee="B", offer=1, paused=True)]
+    state = make_poller(config, entries, rows).step()
+
+    assert state["paused"] is True
+    assert state["nomination"]["verdict"] is None
+    assert state["nomination"]["verdict_reason"] == "draft paused"
+
+
+def test_source_outage_keeps_serving_the_last_good_state(config):
+    """A SleeperUnavailableError (live outage AND cache miss) must not
+    kill the loop or blank the page: the last good budgets stay up,
+    labeled with the error; the next good poll clears the label."""
+    rows = [sheet_row(1, "A", "WR", 37.0), sheet_row(2, "B", "RB", 20.0)]
+    good = make_tick([raw_auction_pick(1, "A", 3, "37")])
+    entries = [
+        good,
+        SleeperUnavailableError("live fetch of 'picks' failed and no cache"),
+        good,
+    ]
+    poller = make_poller(config, entries, rows)
+
+    first = poller.step()
+    assert first["source_error"] is None
+
+    degraded = poller.step()
+    assert degraded["poll_count"] == 2
+    assert "no cache" in degraded["source_error"]
+    # Everything the last good poll knew is still on screen.
+    assert team_by_slot(degraded, 3)["remaining"] == 163
+    assert [player["player_id"] for player in degraded["players"]] == ["B"]
+    assert degraded["sales"][0]["player_id"] == "A"
+
+    recovered = poller.step()
+    assert recovered["source_error"] is None
+    assert recovered["poll_count"] == 3
+
+
+def test_missing_nomination_metadata_still_serves_values_budgets_sales(config):
+    """Degraded mode: with the draft metadata blanked (no nomination
+    fields at all) the page still gets values, budgets, and sold players
+    from picks polling; the nomination area honestly reports no data
+    instead of hiding the whole page."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "RB", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick([raw_auction_pick(1, "A", 3, "37")])]
+    state = make_poller(config, entries, rows).step()
+
+    nomination = state["nomination"]
+    assert nomination["status"] == "none"
+    assert nomination["player_id"] is None
+    assert nomination["verdict"] is None
+    assert nomination["verdict_reason"] == "no nomination data"
+    # The rest of the page is fully populated from the picks feed.
+    assert len(state["teams"]) == 12
+    assert [player["player_id"] for player in state["players"]] == ["B", "C"]
+    assert state["sales"][0]["amount"] == 37
+    assert state["me"] is not None
+
+
+def test_keeper_board_without_keeper_ids_shows_the_error_not_a_number(config):
+    """The engine's fail-loud keeper guard must surface on the page: a
+    board that shows kept players, analyzed without keeper ids, renders
+    the ValueError as an on-page analysis error — never a confident max
+    bid, never a dead poll loop."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    # Mis-wired on purpose: the tracker knows slot 1 kept a player, but the
+    # poller was handed an empty keeper mapping.
+    tracker = DraftTracker(config, keepers_by_slot={1: ("KEPT",)}, clock=lambda: 0.0)
+    entries = [make_tick(nominee="B", offer=1)]
+    state = make_poller(config, entries, rows, tracker=tracker).step()
+
+    nomination = state["nomination"]
+    assert nomination["analysis"] is None
+    assert "keeper" in nomination["analysis_error"]
+    assert nomination["verdict"] is None
+    # The rest of the page still serves.
+    assert len(state["teams"]) == 12
+
+
+def test_last_of_tier_binds_to_the_tier_flag_not_a_lookalike(config):
+    """The same nominated player flips the warning exactly when his final
+    tier-mate sells: unsold tier-mate -> no warning; tier-mate sold ->
+    warning. Kills any binding to a lookalike field (tier index, rank,
+    remaining-anywhere counts)."""
+    rows = [
+        sheet_row(1, "D", "RB", 40.0),
+        sheet_row(2, "E", "RB", 38.0),  # D's only tier-mate (gap < 4.8)
+        sheet_row(3, "F", "RB", 20.0),  # next tier down
+        sheet_row(4, "G", "WR", 30.0),
+    ]
+
+    both_available = make_poller(
+        config, [make_tick(nominee="D", offer=5)], rows
+    ).step()["nomination"]
+    assert both_available["analysis"]["tier"] == {
+        "tier": 1,
+        "size": 2,
+        "remaining": 2,
+        "last_of_tier": False,
+    }
+    assert both_available["last_of_tier"] is False
+
+    mate_sold = make_poller(
+        config,
+        [make_tick([raw_auction_pick(1, "E", 2, "38", "RB")], nominee="D", offer=5)],
+        rows,
+    ).step()["nomination"]
+    assert mate_sold["analysis"]["tier"]["remaining"] == 1
+    assert mate_sold["analysis"]["tier"]["last_of_tier"] is True
+    assert mate_sold["last_of_tier"] is True
+
+
+def test_sold_nominee_is_priced_on_the_pre_sale_board(config):
+    """Between lots the pointer names the just-sold winner. His analysis
+    must come from the board BEFORE his sale folded in (the engine's seam
+    contract): my own $60 purchase must not debit the budget his numbers
+    are computed from. The retrospective verdict is labeled final, and
+    the lull's later polls reuse the same pre-sale record."""
+    rows = [
+        sheet_row(1, "X", "WR", 55.0),
+        sheet_row(2, "B", "RB", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    sold_tick = make_tick(
+        [raw_auction_pick(1, "X", 7, "60")], nominee="X", offer=60, offering_slot=7
+    )
+    entries = [make_tick(), sold_tick, sold_tick]
+    poller = make_poller(config, entries, rows)
+    poller.step()
+
+    state = poller.step()
+    nomination = state["nomination"]
+    assert nomination["status"] == "sold_between_lots"
+    assert nomination["pre_sale"] is True
+    # Pre-sale, my team had $200 and 15 open slots: cap = 200 - 14 = 186.
+    # Priced post-sale the cap would be (200-60) - 13 = 127.
+    assert nomination["analysis"]["my_cap"] == 186
+    assert nomination["verdict"] is not None
+    assert nomination["verdict"]["basis"] == "final"
+    # But the TEAM rows show the post-sale truth: the money is spent.
+    assert team_by_slot(state, 7)["remaining"] == 140
+
+    lull = poller.step()
+    assert lull["nomination"]["pre_sale"] is True
+    assert lull["nomination"]["analysis"] == nomination["analysis"]
+
+
+def test_nominee_sold_before_first_look_reports_why_instead_of_pricing(config):
+    """Started mid-lull, the dashboard has no pre-sale board for the
+    already-sold nominee: it must say so, not reprice the lot on
+    post-sale money."""
+    rows = [sheet_row(1, "X", "WR", 55.0), sheet_row(2, "B", "RB", 20.0)]
+    entries = [make_tick([raw_auction_pick(1, "X", 7, "60")], nominee="X", offer=60)]
+    state = make_poller(config, entries, rows).step()
+
+    nomination = state["nomination"]
+    assert nomination["analysis"] is None
+    assert nomination["pre_sale"] is False
+    assert "pre-sale" in nomination["analysis_error"]
+    assert nomination["verdict"] is None
