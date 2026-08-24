@@ -473,6 +473,10 @@ class KeeperModel:
         age-matched pool of 6+ year backs — the raw veteran bucket mixes
         in mid-career backs whose aging curve they no longer share.
         """
+        # ``(experience or 0)``: a None-experience candidate deliberately
+        # prices off the YOUNG pool, inherited verbatim from the reference
+        # model (``exp26 or 0``). Reference conformance is load-bearing;
+        # the choice is pinned by test, not changed.
         old_rb = position == "RB" and (experience or 0) >= OLD_RB_EXPERIENCE
         young = (experience or 0) <= 2
         group = POSITION_GROUPS.get(position, frozenset())

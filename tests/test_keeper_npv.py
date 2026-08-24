@@ -161,6 +161,20 @@ class TestComparablePoolAndOptionValues:
         assert options.pool_size == 25
         assert options.widen_level == 0
 
+    def test_none_experience_candidate_draws_the_young_pool(self):
+        """A candidate with UNKNOWN experience prices off the young pool,
+        exactly like a rookie — ``(experience or 0)`` inherited verbatim
+        from the reference model (``exp26 or 0``). Reference conformance
+        is load-bearing, so this pin makes the implicit choice explicit
+        rather than changing it."""
+        model = KeeperModel(_young_pool_samples())
+        unknown = model.option_values(
+            "RB", experience=None, room_price=10.0, price=10.0
+        )
+        rookie = model.option_values("RB", experience=0, room_price=10.0, price=10.0)
+        assert unknown == rookie
+        assert unknown.pool_size == 25  # the young pool, not empty or veteran
+
     def test_end_to_end_snapshot_bucketing_is_detected(self):
         """Full pipeline: player x (snapshot years_exp=3) broke out in 2023
         when his as-of experience was 0. Correct bucketing puts his r1=3.0
