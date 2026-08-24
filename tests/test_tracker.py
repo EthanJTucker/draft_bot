@@ -6,10 +6,13 @@ sources produce, so nothing here can depend on which source is attached.
 
 from __future__ import annotations
 
+import pytest
+
 from draftbot.models import parse_draft, parse_picks
 from draftbot.sources import SourceTick
 from draftbot.tracker import (
     DraftTracker,
+    Sale,
     default_expected_settings,
     keepers_by_slot_from_rosters,
 )
@@ -175,6 +178,103 @@ def test_sold_nominee_beyond_the_grace_window_reads_as_a_stuck_feed(config):
     assert beyond.is_live is False
 
 
+def test_grace_boundary_exactly_at_grace_seconds_is_still_between_lots(config):
+    """The window is inclusive by intent: elapsed == grace_seconds is the
+    last instant of the normal between-lots lull, not yet a stuck feed
+    (pins the <= boundary; a < would flip this exact tick to sold_stale)."""
+    now = [100.0]
+    tracker = DraftTracker(config, clock=lambda: now[0], grace_seconds=10.0)
+    tick = _tick(
+        picks=[raw_auction_pick(1, "A", 1, "51")],
+        metadata={"nominated_player_id": "A"},
+    )
+    tracker.update(tick)
+
+    now[0] = 110.0  # exactly grace_seconds after the observed sale
+    assert tracker.update(tick).nomination.status == "sold_between_lots"
+
+
+def test_degraded_picks_feed_never_renders_a_recent_winner_live(config):
+    """Anti-cheat: a sale lands, then the picks endpoint fails and the
+    client degrades to its older cache while the draft fetch stays fresh.
+    The pointer names the recent winner, the regressed sold set no longer
+    contains him — LIVE here is a ghost lot at his final price."""
+    tracker = DraftTracker(config, clock=lambda: 100.0)
+    fresh = _tick(
+        picks=[raw_auction_pick(1, "A", 1, "51"), raw_auction_pick(2, "B", 2, "10")],
+        metadata={"nominated_player_id": "B", "highest_offer": "10"},
+    )
+    assert tracker.update(fresh).nomination.is_live is False
+
+    degraded = _tick(
+        picks=[raw_auction_pick(1, "A", 1, "51")],
+        metadata={"nominated_player_id": "B", "highest_offer": "10"},
+        stale=frozenset({"picks"}),
+    )
+    view = tracker.update(degraded).nomination
+    assert view.is_live is False
+    assert view.status == "untrusted"
+    assert view.player_id == "B"
+
+
+def test_silent_picks_regression_is_caught_by_the_watermark(config):
+    """Anti-cheat: the picks list shrinks WITHOUT the stale flag (a cache
+    regressed silently). The cross-tick watermark — the most picks this
+    tracker has ever observed — still refuses to rule the lot live."""
+    tracker = DraftTracker(config, clock=lambda: 100.0)
+    tracker.update(
+        _tick(
+            picks=[
+                raw_auction_pick(1, "A", 1, "51"),
+                raw_auction_pick(2, "B", 2, "10"),
+            ],
+            metadata={"nominated_player_id": "B", "highest_offer": "10"},
+        )
+    )
+
+    regressed = _tick(
+        picks=[raw_auction_pick(1, "A", 1, "51")],
+        metadata={"nominated_player_id": "B", "highest_offer": "10"},
+    )
+    view = tracker.update(regressed).nomination
+    assert view.is_live is False
+    assert view.status == "untrusted"
+
+
+def test_feed_recovery_restores_live_nominations(config):
+    """Once the picks feed returns fresh at (or past) the watermark, a
+    genuinely new lot renders live again — the guard suppresses only
+    while the feed cannot be trusted."""
+    tracker = DraftTracker(config, clock=lambda: 100.0)
+    full_picks = [raw_auction_pick(1, "A", 1, "51"), raw_auction_pick(2, "B", 2, "10")]
+    tracker.update(_tick(picks=full_picks, metadata={"nominated_player_id": "B"}))
+    tracker.update(
+        _tick(
+            picks=full_picks[:1],
+            metadata={"nominated_player_id": "B"},
+            stale=frozenset({"picks"}),
+        )
+    )
+
+    recovered = tracker.update(
+        _tick(picks=full_picks, metadata={"nominated_player_id": "C"})
+    )
+    assert recovered.nomination.is_live is True
+    assert recovered.nomination.status == "live"
+
+
+def test_empty_pre_draft_feed_still_allows_the_first_nomination(config):
+    """A legitimately empty feed (no sales yet, watermark 0) is not a
+    regression: the draft's first nomination must render live."""
+    view = (
+        DraftTracker(config)
+        .update(_tick(metadata={"nominated_player_id": "A", "highest_offer": "1"}))
+        .nomination
+    )
+    assert view.is_live is True
+    assert view.status == "live"
+
+
 def test_settings_diff_catches_a_timer_mismatch_not_just_budget(config):
     """Anti-cheat: budget, teams, and type all match here; only the
     nomination timer differs. A diff that only checks the budget shows a
@@ -216,10 +316,16 @@ def test_matching_settings_produce_no_warnings(config):
     assert not board.settings_warnings
 
 
-def test_keepers_without_entered_budgets_is_a_settings_warning(config):
+def test_keeper_budget_warning_holds_until_every_keeper_team_is_covered(config):
     """The 2026 pre-entry condition: rosters show keepers but no
     budget_<slot> keys exist yet, so every budget on the board is a $200
-    default that overstates what keeper teams can spend."""
+    default that overstates what keeper teams can spend.
+
+    Anti-cheat: the commissioner enters budgets ONE TEAM AT A TIME on
+    draft morning. The first entry must not clear the banner while ten
+    keeper teams still show the default; covering every keeper-holding
+    slot must clear it (a non-keeper slot's missing key never cries wolf).
+    """
     keepers = {slot: ("K1", "K2", "K3") for slot in range(1, 12)}
     tracker = DraftTracker(config, keepers_by_slot=keepers)
 
@@ -227,8 +333,14 @@ def test_keepers_without_entered_budgets_is_a_settings_warning(config):
     fields = [warning.field for warning in warned.settings_warnings]
     assert "keeper_budgets" in fields
 
+    partial = tracker.update(_tick(settings={"budget_1": 150}))
+    partial_fields = [warning.field for warning in partial.settings_warnings]
+    assert "keeper_budgets" in partial_fields
+
+    # All 11 keeper-holding slots covered; slot 12 holds no keepers, so
+    # its absent budget_12 key must not keep the warning alive.
     entered = tracker.update(
-        _tick(settings={f"budget_{slot}": 150 for slot in range(1, 13)})
+        _tick(settings={f"budget_{slot}": 150 for slot in range(1, 12)})
     )
     assert not entered.settings_warnings
 
@@ -304,6 +416,62 @@ def test_unknown_position_players_occupy_a_bench_slot(config):
 
     assert team.needs["BN"] == 5
     assert sum(team.needs.values()) == team.open_slots == 14
+
+
+def test_board_lists_every_sale_for_the_inflation_math(config):
+    """Issue #5's inflation ratio removes sold players from the pool and
+    counts on-model dollars from the board ALONE: every sale surfaces with
+    id, price, and buying slot in feed order, not just the off-model
+    subset."""
+    board = DraftTracker(config).update(
+        _tick(
+            picks=[raw_auction_pick(1, "A", 5, "30"), raw_auction_pick(2, "B", 2, "7")]
+        )
+    )
+    assert board.sales == (Sale("A", 30, 5), Sale("B", 7, 2))
+
+
+def test_board_carries_the_timer_and_pause_still_blocks_expiry(config):
+    """Issue #7 renders the countdown from the board: timer_end_at
+    surfaces, and the pause guard rides along — a paused draft's frozen
+    timer must not read as expired from the board either."""
+    running = DraftTracker(config).update(_tick(metadata={"timer_end_at": "1000000"}))
+    assert running.timer_end_at == 1_000_000
+    assert running.is_timer_expired(now_ms=1_000_000) is True
+    assert running.is_timer_expired(now_ms=999_999) is False
+
+    paused = DraftTracker(config).update(
+        _tick(metadata={"timer_end_at": "1000000", "paused": "true"})
+    )
+    assert paused.is_timer_expired(now_ms=2_000_000) is False
+
+
+def test_nomination_view_distinguishes_nominator_from_high_bidder(config):
+    """The wire carries two different teams: nominating_slot is who
+    NOMINATED the player, offering_slot who holds the HIGH BID. The view
+    must keep them apart — conflating them tells Ethan the wrong team is
+    spending."""
+    board = DraftTracker(config).update(
+        _tick(
+            metadata={
+                "nominated_player_id": "C",
+                "highest_offer": "23",
+                "nominating_slot": "4",
+                "offering_slot": "9",
+            }
+        )
+    )
+    assert board.nomination.is_live is True
+    assert board.nomination.nominating_slot == 4
+    assert board.nomination.offering_slot == 9
+
+
+def test_team_needs_are_read_only(config):
+    """TeamState is shared derived state; a consumer decrementing needs
+    in place would corrupt every later reader of the same board."""
+    team = DraftTracker(config).update(_tick()).team(1)
+    with pytest.raises(TypeError):
+        team.needs["QB"] = 0  # type: ignore[index]
 
 
 def test_pause_and_staleness_propagate_to_the_board(config):

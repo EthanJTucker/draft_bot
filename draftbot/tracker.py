@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from draftbot.config import LeagueConfig
 from draftbot.models import DraftState, to_int
@@ -25,6 +26,9 @@ NOMINATION_LIVE = "live"
 NOMINATION_NONE = "none"
 NOMINATION_SOLD_GRACE = "sold_between_lots"
 NOMINATION_SOLD_STALE = "sold_stale"
+# The picks feed behind the sold set is degraded or has regressed, so it
+# cannot prove the lot is open: is_live stays False, whatever the pointer says.
+NOMINATION_UNTRUSTED = "untrusted"
 
 FLEX_ELIGIBLE = ("RB", "WR", "TE")
 
@@ -65,9 +69,16 @@ class TeamState:
 class NominationView:
     """The current lot, AFTER the stale-pointer guard has ruled on it.
 
-    ``is_live`` is true only for a nominee absent from the sold set; a sold
-    nominee is ``sold_between_lots`` within the post-sale grace window and
-    ``sold_stale`` beyond it — in no case does it render as live.
+    ``is_live`` is true only for a nominee absent from the sold set AND
+    observed through a trusted picks feed. A sold nominee is
+    ``sold_between_lots`` within the post-sale grace window and
+    ``sold_stale`` beyond it; an unsold-looking nominee behind a degraded
+    or regressed picks feed is ``untrusted`` — in no case do any of these
+    render as live.
+
+    ``nominating_slot`` is the slot that NOMINATED the player;
+    ``offering_slot`` is the slot holding the current HIGH BID (two
+    different teams on the wire).
     """
 
     player_id: str | None
@@ -75,6 +86,7 @@ class NominationView:
     status: str
     highest_offer: int | None = None
     nominating_slot: int | None = None
+    offering_slot: int | None = None
 
 
 @dataclass(frozen=True)
@@ -140,8 +152,23 @@ def diff_settings(
 
 
 @dataclass(frozen=True)
+class Sale:
+    """One completed sale as the board carries it: id, price, and buying
+    slot — enough for issue #5 to compute the remaining player pool and
+    on-model dollars from the board alone."""
+
+    player_id: str
+    amount: int | None
+    draft_slot: int
+
+
+@dataclass(frozen=True)
 class BoardState:
     """Everything the tracker knows after one tick."""
+
+    # pylint: disable=too-many-instance-attributes  # derived record type:
+    # the board IS the consumer surface; one field per thing issues #5-#7
+    # read from it.
 
     status: str
     paused: bool
@@ -153,6 +180,9 @@ class BoardState:
     # must leave them out of its ratio.
     off_model_player_ids: tuple[str, ...] = ()
     stale_endpoints: frozenset[str] = frozenset()
+    # Every sale in feed order (off_model_player_ids is the flagged subset).
+    sales: tuple[Sale, ...] = ()
+    timer_end_at: int | None = None
 
     def team(self, slot: int) -> TeamState:
         """The team drafting from ``slot``."""
@@ -160,6 +190,15 @@ class BoardState:
             if team.slot == slot:
                 return team
         raise KeyError(f"no team in draft slot {slot}")
+
+    def is_timer_expired(self, now_ms: int) -> bool:
+        """Whether the bid/nomination timer has run out, honoring the
+        pause guard (mirrors ``DraftState.is_timer_expired``: a paused
+        draft freezes ``timer_end_at`` in the past and NEVER reads as
+        expired)."""
+        if self.paused or self.timer_end_at is None:
+            return False
+        return now_ms >= self.timer_end_at
 
 
 class DraftTracker:
@@ -193,6 +232,9 @@ class DraftTracker:
         }
         self._clock = clock
         self._grace_seconds = grace_seconds
+        # Cross-tick watermark: the most picks this tracker has ever seen.
+        # Times grace off each observed sale, and marks any SHORTER feed
+        # as regressed (it is missing sales we know happened).
         self._observed_sales = 0
         self._last_sale_at: float | None = None
 
@@ -201,15 +243,28 @@ class DraftTracker:
         if len(tick.picks) > self._observed_sales:
             self._observed_sales = len(tick.picks)
             self._last_sale_at = self._clock()
+        # The sold-set guard would fail open ACROSS ticks if the picks
+        # feed slipped: a cache-served ("picks" stale) or regressed
+        # (shorter than the watermark) feed can be missing a recent sale,
+        # so it can never prove a lot is open.
+        picks_trusted = (
+            "picks" not in tick.stale_endpoints
+            and len(tick.picks) >= self._observed_sales
+        )
         sold = {pick.player_id for pick in tick.picks}
         return BoardState(
             status=tick.draft.status,
             paused=tick.draft.paused,
             teams=tuple(self._team_state(slot, tick) for slot in self._slots(tick)),
-            nomination=self._resolve_nomination(tick.draft, sold),
+            nomination=self._resolve_nomination(tick.draft, sold, picks_trusted),
             settings_warnings=self._settings_warnings(tick.draft),
             off_model_player_ids=self._off_model(tick),
             stale_endpoints=tick.stale_endpoints,
+            sales=tuple(
+                Sale(pick.player_id, pick.amount, pick.draft_slot)
+                for pick in tick.picks
+            ),
+            timer_end_at=tick.draft.timer_end_at,
         )
 
     def _off_model(self, tick: SourceTick) -> tuple[str, ...]:
@@ -224,40 +279,63 @@ class DraftTracker:
         )
 
     def _settings_warnings(self, draft: DraftState) -> tuple[SettingsMismatch, ...]:
-        """Assumption diffs, plus the pre-entry keeper condition: rosters
-        show keepers but no budget_<slot> exists yet, so every default
-        budget on the board overstates what a keeper team can spend."""
+        """Assumption diffs, plus the pre-entry keeper condition: a keeper
+        team without its budget_<slot> key shows the config default, which
+        overstates what it can spend. The warning holds while ANY
+        keeper-holding slot is uncovered — the commissioner enters budgets
+        one team at a time, and the first entry must not clear the banner
+        for the rest of the room."""
         warnings = list(diff_settings(draft, self._expected_settings))
-        keeper_teams = sum(1 for players in self._keepers_by_slot.values() if players)
-        if keeper_teams and not draft.budget_by_slot:
+        missing = sorted(
+            slot
+            for slot, players in self._keepers_by_slot.items()
+            if players and slot not in draft.budget_by_slot
+        )
+        if missing:
             warnings.append(
                 SettingsMismatch(
                     field="keeper_budgets",
-                    expected=f"budget_<slot> entered ({keeper_teams} teams "
-                    "hold keepers)",
-                    actual="not entered; teams shown at the "
-                    f"${self._config.auction_budget} default",
+                    expected="budget_<slot> entered for every keeper team",
+                    actual=(
+                        f"missing for {len(missing)} keeper team(s) "
+                        f"(slots {', '.join(str(slot) for slot in missing)}); "
+                        f"shown at the ${self._config.auction_budget} default"
+                    ),
                 )
             )
         return tuple(warnings)
 
-    def _resolve_nomination(self, draft: DraftState, sold: set[str]) -> NominationView:
+    def _resolve_nomination(
+        self, draft: DraftState, sold: set[str], picks_trusted: bool
+    ) -> NominationView:
         """Rule on the nomination pointer against the FULL sold set — the
         pointer can lag more than one lot, so comparing against only the
-        latest pick's winner is exactly the lazy guard this forbids."""
+        latest pick's winner is exactly the lazy guard this forbids. And
+        the sold set is only as trustworthy as the picks feed behind it:
+        a degraded or regressed feed can be missing a recent sale, so it
+        never rules a lot LIVE (a fresh guard, deliberately, rather than a
+        cumulative sold set — that would misread a commissioner pick-undo
+        as a still-sold player)."""
         nominee = draft.nominated_player_id
         if not nominee:
             return NominationView(None, False, NOMINATION_NONE)
         offer = to_int(draft.highest_offer)
-        slot = to_int(draft.nominating_slot)
+        nominator = to_int(draft.nominating_slot)
+        bidder = to_int(draft.offering_slot)
         if nominee in sold:
             in_grace = (
                 self._last_sale_at is not None
+                # Inclusive boundary by intent: elapsed == grace_seconds
+                # is the last instant of the normal between-lots lull.
                 and self._clock() - self._last_sale_at <= self._grace_seconds
             )
             status = NOMINATION_SOLD_GRACE if in_grace else NOMINATION_SOLD_STALE
-            return NominationView(nominee, False, status, offer, slot)
-        return NominationView(nominee, True, NOMINATION_LIVE, offer, slot)
+            return NominationView(nominee, False, status, offer, nominator, bidder)
+        if not picks_trusted:
+            return NominationView(
+                nominee, False, NOMINATION_UNTRUSTED, offer, nominator, bidder
+            )
+        return NominationView(nominee, True, NOMINATION_LIVE, offer, nominator, bidder)
 
     def _slots(self, tick: SourceTick) -> list[int]:
         if tick.draft.slot_to_roster_id:
@@ -283,7 +361,9 @@ class DraftTracker:
             keeper_count=len(keepers),
             purchase_count=len(purchases),
             open_slots=open_slots,
-            needs=self._compute_needs(positions),
+            # Read-only proxy: a consumer decrementing needs in place would
+            # corrupt every later reader of the same board.
+            needs=MappingProxyType(self._compute_needs(positions)),
         )
 
     def _compute_needs(self, positions: Sequence[str | None]) -> dict[str, int]:
