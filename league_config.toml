@@ -35,6 +35,14 @@ cost_floor = 5            # minimum keeper cost
 max_keepers = 3
 max_consecutive_years = 2 # a player may be kept at most 2 years in a row
 
+# Valuation-model tunables (decisions recorded in GAMEPLAN.md). Omitting
+# any key, or the whole section, falls back to these same defaults.
+[valuation]
+band_ratio = 1.6       # ADP band spans adp/ratio .. adp*ratio, inclusive
+min_band_samples = 6   # thinner bands fall back to the fitted log curve
+gamma = 0.8            # per-season discount on the keeper option value
+curve_cap = true       # cap curve prices at the position's max observed bid
+
 [me]
 username = "firstrider55"
 user_id = "868914670222921728"

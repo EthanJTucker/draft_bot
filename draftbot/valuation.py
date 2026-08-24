@@ -19,7 +19,13 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
-from draftbot.config import LeagueConfig
+from draftbot.config import (
+    DEFAULT_BAND_RATIO,
+    DEFAULT_CURVE_CAP,
+    DEFAULT_GAMMA,
+    DEFAULT_MIN_BAND_SAMPLES,
+    LeagueConfig,
+)
 from draftbot.models import Pick
 
 #: Positions with an auction market worth modeling; K/DEF go for $1 here.
@@ -29,15 +35,15 @@ VALUED_POSITIONS = ("QB", "RB", "WR", "TE")
 NO_ADP_SENTINEL = 999.0
 
 #: An ADP band spans adp/BAND_RATIO .. adp*BAND_RATIO, inclusive.
-BAND_RATIO = 1.6
+BAND_RATIO = DEFAULT_BAND_RATIO
 
 #: Bands with fewer samples than this fall back to the fitted log curve.
-MIN_BAND_SAMPLES = 6
+MIN_BAND_SAMPLES = DEFAULT_MIN_BAND_SAMPLES
 
 #: Cap curve-fallback prices at the position's max observed bid (decided
 #: 2026-08-23: the room has never paid more than its own record at a
 #: position, and an extrapolated curve must not claim it will).
-CURVE_CAP = True
+CURVE_CAP = DEFAULT_CURVE_CAP
 
 #: Nobody sells below the $1 minimum bid.
 FLOOR_PRICE = 1.0
@@ -368,7 +374,7 @@ def compute_worths(
 
 
 #: Multi-year keeper discount per season of delay (decided in GAMEPLAN.md).
-GAMMA = 0.8
+GAMMA = DEFAULT_GAMMA
 
 #: Room prices under $3 are auction noise; they never form transitions.
 MIN_TRANSITION_PRICE = 3.0
@@ -387,6 +393,18 @@ MIN_TWO_YEAR_SAMPLES = 10
 
 #: An RB with this much experience prices off the age-matched pool.
 OLD_RB_EXPERIENCE = 8
+
+#: The age-matched old-RB pool takes backs with at least this much as-of
+#: experience, relaxing by one year at the widest pool level.
+OLD_RB_POOL_MIN_EXPERIENCE = 6
+OLD_RB_POOL_MIN_EXPERIENCE_WIDE = 5
+
+#: Young players: as-of experience at or below this shares the young pool.
+YOUNG_EXPERIENCE_MAX = 2
+
+#: Veterans: as-of experience in this inclusive range shares the mid pool.
+VETERAN_EXPERIENCE_MIN = 3
+VETERAN_EXPERIENCE_MAX = 8
 
 #: Positions whose transitions are comparable to each candidate position
 #: before the pool widens to every position (TEs price like thin WRs).
@@ -532,7 +550,7 @@ class KeeperModel:
         # model (``exp26 or 0``). Reference conformance is load-bearing;
         # the choice is pinned by test, not changed.
         old_rb = position == "RB" and (experience or 0) >= OLD_RB_EXPERIENCE
-        young = (experience or 0) <= 2
+        young = (experience or 0) <= YOUNG_EXPERIENCE_MAX
         group = POSITION_GROUPS.get(position, frozenset())
         min_pool = MIN_OLD_RB_POOL_SIZE if old_rb else MIN_POOL_SIZE
 
@@ -540,16 +558,22 @@ class KeeperModel:
             if sample.experience is None:
                 return False
             if old_rb:
-                floor = 6 if level < 2 else 5
+                floor = (
+                    OLD_RB_POOL_MIN_EXPERIENCE
+                    if level < 2
+                    else OLD_RB_POOL_MIN_EXPERIENCE_WIDE
+                )
                 comparable = sample.position == "RB" and sample.experience >= floor
             elif young:
                 comparable = (
                     sample.position in group or level >= 1
-                ) and sample.experience <= 2
+                ) and sample.experience <= YOUNG_EXPERIENCE_MAX
             else:
-                comparable = (
-                    sample.position in group or level >= 1
-                ) and 3 <= sample.experience <= 8
+                comparable = (sample.position in group or level >= 1) and (
+                    VETERAN_EXPERIENCE_MIN
+                    <= sample.experience
+                    <= VETERAN_EXPERIENCE_MAX
+                )
             band = POOL_PRICE_BANDS[level]
             return comparable and price / band <= sample.price <= price * band
 
@@ -641,7 +665,8 @@ def _fit_models(
 ) -> tuple[PriceModel, KeeperModel]:
     """The fitted price and keeper models behind one value sheet, with
     keeper rows (flagged, plus detected when slot maps are given) kept out
-    of the bid pool."""
+    of the bid pool. The valuation knobs (band ratio, band sample gate,
+    curve cap, gamma) flow from the config's [valuation] section."""
     rules = KeeperRules(
         cost_increment=config.keeper_cost_increment,
         cost_floor=config.keeper_cost_floor,
@@ -650,10 +675,16 @@ def _fit_models(
     keeper_rows: AbstractSet[tuple[int, str]] = frozenset()
     if slot_to_roster_by_year is not None:
         keeper_rows = detect_keeper_picks(picks_by_year, slot_to_roster_by_year, rules)
-    prices = PriceModel(build_bids(picks_by_year, seasons, exclude=keeper_rows))
+    prices = PriceModel(
+        build_bids(picks_by_year, seasons, exclude=keeper_rows),
+        band_ratio=config.band_ratio,
+        min_band_samples=config.min_band_samples,
+        curve_cap=config.curve_cap,
+    )
     keeper = KeeperModel(
         build_transition_samples(seasons, prices, config.season),
         rules=rules,
+        gamma=config.gamma,
     )
     return prices, keeper
 

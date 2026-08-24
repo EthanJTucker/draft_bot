@@ -11,10 +11,13 @@ import math
 
 import pytest
 
+from draftbot.config import LeagueConfig
 from draftbot.models import parse_picks
 from draftbot.valuation import (
     Bid,
+    OptionValues,
     PriceModel,
+    _fit_models,
     build_bids,
     compute_worths,
     detect_keeper_picks,
@@ -292,6 +295,8 @@ class TestCurveCap:
     RB_PAIRS = [(10.0, 20.0), (20.0, 5.0)]
 
     def test_cap_binds_when_the_curve_passes_the_positions_top_bid(self):
+        """The wild ~$69.8 extrapolation prices at the $20 record, and the
+        source column says the cap (not the curve) set the number."""
         model = PriceModel(_bids("RB", self.RB_PAIRS))
         assert model.curve_price("RB", 1.0) > 20.0  # the raw curve is wild
         assert model.room_price("RB", 1.0) == 20.0
@@ -416,3 +421,79 @@ class TestWorth:
             season, roster_slots={"QB": 1, "BN": 1}, teams=2, budget=10
         )
         assert set(worths.values()) == {1.0}
+
+
+def _league_config(**overrides):
+    """A minimal LeagueConfig for model-fit tests (tiny two-team league);
+    valuation knobs default to the decided values unless overridden."""
+    base = {
+        "league_name": "T",
+        "season": 2026,
+        "league_id": "L",
+        "draft_id": "D",
+        "teams": 2,
+        "auction_budget": 12,
+        "roster_slots": {"QB": 1, "BN": 1},
+        "keeper_cost_increment": 2,
+        "keeper_cost_floor": 5,
+        "max_keepers": 3,
+        "max_consecutive_keep_years": 2,
+        "my_username": "u",
+        "my_user_id": "i",
+        "my_roster_id": 1,
+    }
+    base.update(overrides)
+    return LeagueConfig(**base)
+
+
+class TestValuationConfigFlow:
+    """The [valuation] knobs flow from LeagueConfig into the fitted models."""
+
+    @staticmethod
+    def _world():
+        """Two RB bids ($20 @ adp 10, $5 @ adp 20) whose curve extrapolates
+        to ~$69.8 at adp 1, far past the $20 position max."""
+        seasons = {
+            2023: parse_projections(
+                [projection_row("a", "RB", 10.0), projection_row("b", "RB", 20.0)]
+            ),
+            2026: parse_projections([]),
+        }
+        picks = {
+            2023: parse_picks(
+                [_raw_pick("a", "RB", 20, slot=1), _raw_pick("b", "RB", 5, slot=2)]
+            )
+        }
+        return seasons, picks
+
+    def test_gamma_flows_to_the_keeper_model(self):
+        """premium = g*OV1 + g^2*OV2 at the CONFIG gamma, not the default."""
+        seasons, picks = self._world()
+        _, keeper = _fit_models(seasons, picks, _league_config(gamma=0.25), None)
+        options = OptionValues(one_year=1.0, two_year=1.0, pool_size=1, widen_level=0)
+        assert keeper.premium(options) == pytest.approx(0.25 + 0.25**2)
+
+    def test_curve_cap_toggle_flows_to_the_price_model(self):
+        """curve_cap=false in config restores the raw fitted curve."""
+        seasons, picks = self._world()
+        capped, _ = _fit_models(seasons, picks, _league_config(), None)
+        assert capped.room_price("RB", 1.0) == 20.0
+        assert capped.price_source("RB", 1.0) == "curve_capped"
+        uncapped, _ = _fit_models(seasons, picks, _league_config(curve_cap=False), None)
+        assert uncapped.room_price("RB", 1.0) > 20.0
+        assert uncapped.price_source("RB", 1.0) == "curve"
+
+    def test_band_settings_flow_to_the_price_model(self):
+        """min_band_samples=2 alone leaves adp 10 on the curve (its 1.6-ratio
+        band holds one bid); widening band_ratio to 5.0 pulls both bids in
+        and prices the $12.50 band median — each knob observably flows."""
+        seasons, picks = self._world()
+        narrow, _ = _fit_models(
+            seasons, picks, _league_config(min_band_samples=2), None
+        )
+        assert narrow.price_source("RB", 10.0) == "curve"
+        wide, _ = _fit_models(
+            seasons, picks, _league_config(min_band_samples=2, band_ratio=5.0), None
+        )
+        assert wide.room_price("RB", 10.0) == 12.5
+        assert wide.price_source("RB", 10.0) == "band"

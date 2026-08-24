@@ -79,7 +79,7 @@ def _draft(draft_id):
 def _payloads():
     """A tiny but complete world: six 2023 RB bids ($5 x3, $15 x3, all ADP
     10) pin room(RB, 10) at the $10 band median, and the 2026 pool ranks
-    qb1 > qb2 > rb1 > rb2 > qb3/rb3 by worth.
+    qb1 > qb2 > rb1 > rb2 > qb3/qb4/rb3 by worth (id ties the floor trio).
 
     The 2024 feed carries ONE row: h0's owner (roster 1 both years) holds
     him at exactly max(5+2, 5) = $7 — an unflagged keeper entry, exactly
@@ -184,6 +184,36 @@ def test_no_adp_sentinel_is_blanked_in_the_csv(world):
     assert by_id["qb4"][4] == ""  # ADP blank, exactly like missing points
     assert by_id["qb4"][7] == "1.00"  # still prices at the floor
     assert by_id["qb4"][8] == "floor"
+
+
+def test_valuation_tunables_flow_from_the_config_file(tmp_path):
+    """A [valuation] section with min_band_samples = 7 starves rb1's 6-bid
+    band; this world's RB bids share one ADP, so no curve can fit and rb1
+    lands on the $1 floor instead of the $10 band median — proof the
+    config file's knobs reach the fitted models."""
+    config_path = tmp_path / "league.toml"
+    config_path.write_text(
+        CONFIG_TOML + "\n[valuation]\nmin_band_samples = 7\n", encoding="utf-8"
+    )
+    out = io.StringIO()
+    out_csv = tmp_path / "sheet.csv"
+    code = main(
+        [
+            "--config",
+            str(config_path),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--out",
+            str(out_csv),
+        ],
+        http_get=FakeTransport(_payloads()),
+        out=out,
+    )
+    assert code == 0
+    lines = out_csv.read_text(encoding="utf-8").strip().split("\n")
+    by_id = {c[1]: c for c in (line.split(",") for line in lines[1:])}
+    assert by_id["rb1"][7] == "1.00"  # the default config prices this 10.00
+    assert by_id["rb1"][8] == "floor"
 
 
 def test_csv_is_byte_identical_across_runs(world):

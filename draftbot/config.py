@@ -21,6 +21,15 @@ DEFAULT_CACHE_DIR = "data/cache"
 DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS = 86400
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 15.0
 
+# Valuation-model tunables (the decided values from GAMEPLAN.md; the
+# [valuation] section of league_config.toml states them explicitly, and
+# draftbot/valuation.py aliases these as its module defaults so config
+# and code cannot drift apart).
+DEFAULT_BAND_RATIO = 1.6
+DEFAULT_MIN_BAND_SAMPLES = 6
+DEFAULT_GAMMA = 0.8
+DEFAULT_CURVE_CAP = True
+
 
 @dataclass(frozen=True)
 class LeagueConfig:
@@ -47,6 +56,12 @@ class LeagueConfig:
     cache_dir: str = DEFAULT_CACHE_DIR
     player_map_max_age_seconds: int = DEFAULT_PLAYER_MAP_MAX_AGE_SECONDS
     request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS
+    # Valuation tunables ([valuation] in the TOML; defaults keep pricing
+    # identical for configs written before the section existed).
+    band_ratio: float = DEFAULT_BAND_RATIO
+    min_band_samples: int = DEFAULT_MIN_BAND_SAMPLES
+    gamma: float = DEFAULT_GAMMA
+    curve_cap: bool = DEFAULT_CURVE_CAP
 
     def __post_init__(self):
         # frozen=True alone leaves the mapping fields mutable; wrap them in
@@ -79,6 +94,7 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
     me = raw["me"]
     cache = raw.get("cache", {})
     http = raw.get("http", {})
+    valuation = raw.get("valuation", {})
     config_dir = Path(path).resolve().parent
     return LeagueConfig(
         league_name=league["name"],
@@ -103,4 +119,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
         request_timeout_seconds=http.get(
             "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS
         ),
+        band_ratio=valuation.get("band_ratio", DEFAULT_BAND_RATIO),
+        min_band_samples=valuation.get("min_band_samples", DEFAULT_MIN_BAND_SAMPLES),
+        gamma=valuation.get("gamma", DEFAULT_GAMMA),
+        curve_cap=valuation.get("curve_cap", DEFAULT_CURVE_CAP),
     )
