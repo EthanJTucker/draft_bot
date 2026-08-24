@@ -134,6 +134,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="my draft slot (default: resolved from the config's roster id)",
     )
+    parser.add_argument(
+        "--allow-no-keepers",
+        action="store_true",
+        help="serve live mode even though this keeper league's rosters "
+        "returned zero keepers (only if the league truly kept no one)",
+    )
     return parser.parse_args(argv)
 
 
@@ -173,7 +179,12 @@ def _replay_runtime(args: argparse.Namespace, err: TextIO):
     return None if rows is None else (source, rows, {})
 
 
-def _build_runtime(args: argparse.Namespace, config: LeagueConfig, err: TextIO):
+def _build_runtime(
+    args: argparse.Namespace,
+    config: LeagueConfig,
+    err: TextIO,
+    http_get=None,
+):
     """(source, rows, keepers_by_slot) for the chosen mode, or None after
     printing why. Live mode touches the network exactly once here (draft
     + rosters, for the keeper lists the picks feed never carries)."""
@@ -189,23 +200,56 @@ def _build_runtime(args: argparse.Namespace, config: LeagueConfig, err: TextIO):
     rows = _read_sheet_or_none(args.sheet, err)
     if rows is None:
         return None
-    client = SleeperClient(config, cache_dir=args.cache_dir)
+    client = SleeperClient(config, cache_dir=args.cache_dir, http_get=http_get)
     try:
         draft = parse_draft(client.get_draft())
         keepers = keepers_by_slot_from_rosters(draft, client.get_rosters())
     except SleeperUnavailableError as error:
         print(f"error: {error}", file=err)
         return None
+    if _keepers_missing(args, config, keepers):
+        print(
+            f"error: this is a keeper league (max_keepers "
+            f"{config.max_keepers}) but Sleeper's rosters returned zero "
+            "keepers; pricing the board keeper-free would overstate open "
+            "slots and offer kept players for sale. Enter keepers on "
+            "Sleeper, or pass --allow-no-keepers if the league truly "
+            "kept no one.",
+            file=err,
+        )
+        return None
     return LivePollSource(client), rows, keepers
 
 
-def main(argv: list[str] | None = None, *, server=None, out: TextIO | None = None):
+def _keepers_missing(args: argparse.Namespace, config: LeagueConfig, keepers) -> bool:
+    """True when a keeper league's rosters yielded no keepers at all and
+    the operator did not explicitly wave it through. Silently pricing a
+    keeper board keeper-free is the quiet version of a wrong number, and
+    no banner would fire (the keeper_budgets warning keys off the same
+    empty mapping) — so this refuses at startup instead."""
+    return (
+        config.max_keepers > 0
+        and not any(keepers.values())
+        and not args.allow_no_keepers
+    )
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    server=None,
+    out: TextIO | None = None,
+    http_get=None,
+):
     """Build the runtime for the chosen mode and serve the dashboard.
 
-    ``server`` and ``out`` are injectable for tests (the default server
-    is uvicorn plus the poll-loop thread). Exit codes: 0 served and shut
-    down cleanly; 2 nothing ran (bad config, fixture, or sheet path, or
-    live mode without a sheet / with a dead unavailable API).
+    ``server``, ``out``, and ``http_get`` are injectable for tests (the
+    default server is uvicorn plus the poll-loop thread; the default
+    transport is the real one — the trackdemo pattern). Exit codes: 0
+    served and shut down cleanly; 2 nothing ran (bad config, fixture, or
+    sheet path, an out-of-range --my-slot, or live mode without a sheet /
+    with a dead unavailable API / with a keeper league whose rosters
+    carry no keepers).
     """
     args = _parse_args(argv)
     if out is None and hasattr(sys.stdout, "reconfigure"):
@@ -227,7 +271,7 @@ def main(argv: list[str] | None = None, *, server=None, out: TextIO | None = Non
             file=err,
         )
         return 2
-    runtime = _build_runtime(args, config, err)
+    runtime = _build_runtime(args, config, err, http_get=http_get)
     if runtime is None:
         return 2
     poller = _wire_poller(runtime, config, my_slot=args.my_slot)

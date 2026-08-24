@@ -18,11 +18,14 @@ from fastapi.testclient import TestClient
 from draftbot.dashboard.app import create_app, main, run_poll_loop
 from draftbot.valuesheet import write_csv
 
-from .conftest import REPO_ROOT
+from .conftest import REPO_ROOT, FakeTransport
 from .helpers_dashboard import make_poller, make_tick
 from .helpers_engine import sheet_row
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
+
+# The real config's draft id (tests use the checked-in league_config.toml).
+DRAFT_ID = "1389692302259138561"
 
 
 class CapturingServer:
@@ -220,6 +223,123 @@ def test_replay_cli_accepts_a_real_sheet_csv(tmp_path):
     assert state["nomination"]["analysis"]["worth"] == 44.0
     # Every other 2025 sale is off this one-row sheet: flagged, not hidden.
     assert state["players"] == []
+
+
+def _live_transport(rosters):
+    """Canned live-mode payloads: the draft object, the rosters (keeper
+    carrier), and an empty picks feed."""
+    draft = {
+        "draft_id": DRAFT_ID,
+        "status": "pre_draft",
+        "type": "auction",
+        "settings": {},
+        "metadata": {},
+        "slot_to_roster_id": {str(slot): slot for slot in range(1, 13)},
+    }
+    return FakeTransport(
+        {f"/draft/{DRAFT_ID}": draft, "/rosters": rosters, "/picks": []}
+    )
+
+
+def _live_args(tmp_path, sheet, *extra):
+    return [
+        "--sheet",
+        str(sheet),
+        "--cache-dir",
+        str(tmp_path / "cache"),
+        "--config",
+        str(REPO_ROOT / "league_config.toml"),
+        *extra,
+    ]
+
+
+def _keeper_sheet(tmp_path):
+    sheet = tmp_path / "sheet.csv"
+    write_csv(
+        [
+            sheet_row(1, "KP", "RB", 30.0, name="Kept Back"),
+            sheet_row(2, "B", "WR", 20.0),
+        ],
+        sheet,
+    )
+    return sheet
+
+
+def test_live_mode_refuses_a_keeper_league_with_zero_keepers(tmp_path):
+    """The config says keeper league (max_keepers 3); if Sleeper's rosters
+    return zero keepers on draft night the dashboard would silently price
+    a keeper board keeper-free — open slots overstated, kept players in
+    the buyable pool — and no banner fires because the keeper_budgets
+    warning keys off the same empty mapping. Startup refuses instead."""
+    rosters = [{"roster_id": slot, "keepers": []} for slot in range(1, 13)]
+    server = CapturingServer()
+    out = io.StringIO()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path)),
+        server=server,
+        out=out,
+        http_get=_live_transport(rosters),
+    )
+
+    assert code == 2
+    message = out.getvalue()
+    assert "keeper" in message
+    assert "--allow-no-keepers" in message
+    assert server.app is None
+
+
+def test_live_mode_allow_no_keepers_waves_through_an_empty_keeper_map(tmp_path):
+    """The escape hatch: an operator who has confirmed the league truly
+    kept no one can serve anyway, explicitly."""
+    rosters = [{"roster_id": slot, "keepers": []} for slot in range(1, 13)]
+    server = CapturingServer()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--allow-no-keepers"),
+        server=server,
+        out=io.StringIO(),
+        http_get=_live_transport(rosters),
+    )
+
+    assert code == 0
+    assert server.app is not None
+    assert server.poller.step()["ok"] is True
+
+
+def test_live_mode_wires_roster_keepers_into_the_board(tmp_path):
+    """Rosters WITH keepers start cleanly and the keeper mapping flows to
+    both tracker and engine: the kept player is off the buyable table and
+    pinned on my roster as a keeper."""
+    rosters = [
+        {"roster_id": slot, "keepers": ["KP"] if slot == 7 else []}
+        for slot in range(1, 13)
+    ]
+    server = CapturingServer()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path)),
+        server=server,
+        out=io.StringIO(),
+        http_get=_live_transport(rosters),
+    )
+
+    assert code == 0
+    state = server.poller.step()
+    assert state["ok"] is True
+    assert [player["player_id"] for player in state["players"]] == ["B"]
+    me = state["me"]
+    assert me["slot"] == 7  # roster 7 resolved through slot_to_roster_id
+    assert me["open_slots"] == 14  # 15 drafted slots minus the keeper
+    assert me["roster"] == [
+        {
+            "player_id": "KP",
+            "name": "Kept Back",
+            "position": "RB",
+            "price": None,
+            "keeper": True,
+        }
+    ]
 
 
 def test_cli_exits_2_on_missing_config_or_fixture(tmp_path):

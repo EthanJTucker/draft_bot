@@ -76,6 +76,8 @@ def make_tick(
 def make_poller(
     config, entries, rows, *, keepers_by_slot=None, tracker=None, my_slot=None
 ):
+    # pylint: disable=too-many-arguments  # fixture builder wiring the
+    # poller's injectable seams one-to-one (tracker, keepers, my slot).
     """A poller over a scripted source with an injected clock."""
     tracker = tracker or DraftTracker(
         config, keepers_by_slot=keepers_by_slot, clock=lambda: 0.0
