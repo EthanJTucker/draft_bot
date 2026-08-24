@@ -501,26 +501,25 @@ class TestValuationConfigFlow:
         assert wide.price_source("RB", 10.0) == "band"
 
 
-class TestValueMap:
-    """The player_id -> value seam the live tracker injects (issue #4)."""
+def _sheet_row(rank, player_id, value):
+    """A minimal SheetRow for seam tests (floor player, custom value)."""
+    return SheetRow(
+        rank=rank,
+        player_id=player_id,
+        name=f"P {player_id}",
+        position="RB",
+        adp=None,
+        points=None,
+        worth=1.0,
+        room_price=1.0,
+        price_source="floor",
+        keeper_premium=0.0,
+        value=value,
+    )
 
-    @staticmethod
-    def _sheet_row(rank, player_id, value):
-        return SheetRow(
-            rank=rank,
-            player_id=player_id,
-            name=f"P {player_id}",
-            position="RB",
-            adp=None,
-            points=None,
-            worth=1.0,
-            room_price=1.0,
-            price_source="floor",
-            keeper_premium=0.0,
-            value=value,
-        )
 
-    def test_value_map_keys_player_ids_to_sheet_values(self):
-        """One mapping, straight off the rows: id -> NPV-adjusted value."""
-        rows = [self._sheet_row(1, "a", 42.5), self._sheet_row(2, "b", 1.0)]
-        assert value_map(rows) == {"a": 42.5, "b": 1.0}
+def test_value_map_keys_player_ids_to_sheet_values():
+    """The player_id -> value seam the live tracker injects (issue #4):
+    one mapping, straight off the rows."""
+    rows = [_sheet_row(1, "a", 42.5), _sheet_row(2, "b", 1.0)]
+    assert value_map(rows) == {"a": 42.5, "b": 1.0}
