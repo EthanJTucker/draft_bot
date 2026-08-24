@@ -55,7 +55,7 @@ the `[valuation]` section of `league_config.toml`. Writes the CSV where
 `--out` points (default `data/value_sheet_<season>.csv` next to the
 config, gitignored) and prints the top of the board (`--top`, default 30).
 The first run needs the network (or a `data/cache/` already primed by an
-earlier run or the snapshot CLI); after that every endpoint can be served
+earlier value-sheet run); after that every endpoint can be served
 from the cache. Two runs over the same cached inputs emit byte-identical
 CSV. Keeper rows hiding in the historical picks feeds - flagged
 `is_keeper`, or unflagged but matching the same-roster keeper cost-chain
