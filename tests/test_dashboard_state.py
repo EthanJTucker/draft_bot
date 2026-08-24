@@ -262,6 +262,54 @@ def test_source_outage_keeps_serving_the_last_good_state(config):
     assert recovered["poll_count"] == 3
 
 
+def test_any_source_exception_labels_the_snapshot_instead_of_raising(config):
+    """Only SleeperUnavailableError used to be absorbed; any other
+    exception killed the poll thread and left the page serving a
+    confident, unlabeled, frozen state forever. A TypeError from the
+    source (Sleeper serving JSON null is one live trigger) must keep the
+    last good snapshot served WITH the error stamped on it — so the red
+    FEED UNAVAILABLE banner fires — and the next good poll recovers."""
+    rows = [sheet_row(1, "A", "WR", 37.0), sheet_row(2, "B", "RB", 20.0)]
+    good = make_tick([raw_auction_pick(1, "A", 3, "37")])
+    entries = [good, TypeError("'NoneType' object is not iterable"), good]
+    poller = make_poller(config, entries, rows)
+
+    first = poller.step()
+    assert first["source_error"] is None
+
+    degraded = poller.step()  # must NOT raise
+    assert degraded["poll_count"] == 2
+    assert "TypeError" in degraded["source_error"]
+    assert "not iterable" in degraded["source_error"]
+    # The last good board is still on screen, labeled.
+    assert team_by_slot(degraded, 3)["remaining"] == 163
+    assert degraded["sales"][0]["player_id"] == "A"
+
+    recovered = poller.step()
+    assert recovered["source_error"] is None
+    assert recovered["poll_count"] == 3
+
+
+def test_processing_error_before_first_good_poll_surfaces_on_the_page(config):
+    """A my-slot with no team on the board raises deep in snapshot
+    building (board.team). Before the catch-all this killed the thread on
+    poll #1 and the page hung at 'waiting for first poll' with the
+    traceback only on the console. Now the error is IN the served
+    snapshot, and the loop stays alive for later polls."""
+    rows = [sheet_row(1, "A", "WR", 37.0), sheet_row(2, "B", "RB", 20.0)]
+    entries = [make_tick(nominee="B", offer=5)]
+    poller = make_poller(config, entries, rows, my_slot=99)
+
+    state = poller.step()  # must NOT raise
+    assert state["poll_count"] == 1
+    assert "no team in draft slot 99" in state["source_error"]
+    assert state["ok"] is False  # never had a good poll; honest not-ready
+
+    again = poller.step()  # the loop survives to keep reporting
+    assert again["poll_count"] == 2
+    assert "no team in draft slot 99" in again["source_error"]
+
+
 def test_missing_nomination_metadata_still_serves_values_budgets_sales(config):
     """Degraded mode: with the draft metadata blanked (no nomination
     fields at all) the page still gets values, budgets, and sold players

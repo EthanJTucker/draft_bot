@@ -73,7 +73,9 @@ def make_tick(
     )
 
 
-def make_poller(config, entries, rows, *, keepers_by_slot=None, tracker=None):
+def make_poller(
+    config, entries, rows, *, keepers_by_slot=None, tracker=None, my_slot=None
+):
     """A poller over a scripted source with an injected clock."""
     tracker = tracker or DraftTracker(
         config, keepers_by_slot=keepers_by_slot, clock=lambda: 0.0
@@ -84,6 +86,7 @@ def make_poller(config, entries, rows, *, keepers_by_slot=None, tracker=None):
         rows,
         config,
         keepers_by_slot=keepers_by_slot or {},
+        my_slot=my_slot,
         clock=lambda: 1_000.0,
     )
 

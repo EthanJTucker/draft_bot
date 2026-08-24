@@ -132,26 +132,39 @@ class DashboardPoller:
     def step(self) -> dict:
         """One poll cycle: poll, fold, rebuild the snapshot.
 
-        A :class:`SleeperUnavailableError` from the source (live outage
-        with no cache) must not kill the loop OR blank the page: the last
-        good snapshot stays served, labeled with ``source_error``.
+        NOTHING here may kill the poll loop or blank the page — that is
+        the thread the whole draft rides on. A
+        :class:`SleeperUnavailableError` (live outage with no cache) and
+        any other exception (malformed feed data, a null draft object, a
+        board without my slot) both keep the last good snapshot served,
+        labeled with ``source_error`` so the page's red banner fires
+        instead of freezing confident numbers unlabeled.
         """
         self._poll_count += 1
         try:
             tick = self._source.poll()
+            self._absorb_names(tick)
+            prev = self._board
+            board = self._tracker.update(tick)
+            self._prev_board, self._board = prev, board
+            self._snapshot = self._build(board)
         except SleeperUnavailableError as error:
-            self._snapshot = {
-                **self._snapshot,
-                "poll_count": self._poll_count,
-                "source_error": str(error),
-            }
-            return self._snapshot
-        self._absorb_names(tick)
-        prev = self._board
-        board = self._tracker.update(tick)
-        self._prev_board, self._board = prev, board
-        self._snapshot = self._build(board)
+            self._label_failure(str(error))
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            # The deliberate catch-all: an uncaught exception here kills
+            # the daemon poll thread and the page then serves a frozen,
+            # unlabeled state forever. Type + message go on the page.
+            self._label_failure(f"{type(error).__name__}: {error}")
         return self._snapshot
+
+    def _label_failure(self, message: str) -> None:
+        """Keep the last good snapshot, labeled — never a blank page and
+        never an unlabeled frozen one."""
+        self._snapshot = {
+            **self._snapshot,
+            "poll_count": self._poll_count,
+            "source_error": message,
+        }
 
     def _absorb_names(self, tick: SourceTick) -> None:
         """Names/positions from pick metadata, for players off the sheet

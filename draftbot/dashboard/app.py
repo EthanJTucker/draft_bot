@@ -69,8 +69,9 @@ def run_poll_loop(
     poller: DashboardPoller, interval: float, stop: threading.Event
 ) -> None:
     """Step the poller until ``stop`` is set, one cycle per ``interval``
-    seconds. ``step()`` already absorbs source outages, so nothing here
-    can kill the loop mid-draft."""
+    seconds. ``step()`` absorbs every exception (source outages AND
+    processing errors) into a labeled snapshot, so nothing can kill the
+    loop mid-draft."""
     while not stop.is_set():
         poller.step()
         stop.wait(interval)
@@ -216,6 +217,15 @@ def main(argv: list[str] | None = None, *, server=None, out: TextIO | None = Non
 
     config = _load_config_or_none(args.config, err)
     if config is None:
+        return 2
+    if args.my_slot is not None and not 1 <= args.my_slot <= config.teams:
+        # Fail fast: a slot outside the league would otherwise surface
+        # only as a per-poll error banner once the draft is underway.
+        print(
+            f"error: --my-slot {args.my_slot} is outside this league's "
+            f"draft slots (1-{config.teams})",
+            file=err,
+        )
         return 2
     runtime = _build_runtime(args, config, err)
     if runtime is None:

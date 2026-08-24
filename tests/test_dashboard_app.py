@@ -1,17 +1,21 @@
 """The FastAPI surface and the CLI: /state, the static page, the wiring.
 
 The TestClient drives the real ASGI app; the poll loop is stepped by hand
-(deterministic — no thread, no timer). CLI tests inject a fake server the
-same way trackdemo injects its transport.
+(deterministic — no thread, no timer) except for the one test that runs
+``run_poll_loop`` in a real thread, because that loop is the production
+write path. CLI tests inject a fake server the same way trackdemo injects
+its transport.
 """
 
 from __future__ import annotations
 
 import io
+import threading
+import time
 
 from fastapi.testclient import TestClient
 
-from draftbot.dashboard.app import create_app, main
+from draftbot.dashboard.app import create_app, main, run_poll_loop
 from draftbot.valuesheet import write_csv
 
 from .conftest import REPO_ROOT
@@ -108,6 +112,52 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     assert "http://" not in page.replace("http://localhost", "")
     assert "https://" not in page  # fully self-contained: no external assets
     assert "/state" in page
+
+
+def test_run_poll_loop_steps_the_poller_until_stopped(config):
+    """The poll thread's one production line, exercised for real: a
+    thread running run_poll_loop at a tiny interval advances poll_count
+    past 2 and stops cleanly when the event is set. Deleting the step()
+    call from the loop leaves poll_count at 0 and fails here."""
+    poller = make_poller(config, [make_tick()], _rows())
+    stop = threading.Event()
+    thread = threading.Thread(target=run_poll_loop, args=(poller, 0.005, stop))
+
+    thread.start()
+    deadline = time.time() + 10.0
+    while poller.snapshot["poll_count"] < 2 and time.time() < deadline:
+        time.sleep(0.005)
+    stop.set()
+    thread.join(timeout=10.0)
+
+    assert not thread.is_alive()
+    assert poller.snapshot["poll_count"] >= 2
+    assert poller.snapshot["ok"] is True
+
+
+def test_cli_rejects_a_my_slot_outside_the_league():
+    """--my-slot 99 in a 12-team league would otherwise surface only as a
+    per-poll error once the draft is underway; it is a wiring mistake, so
+    it fails fast at startup with exit 2 and never starts the server."""
+    server = CapturingServer()
+    for bad_slot in ("0", "99"):
+        out = io.StringIO()
+        code = main(
+            [
+                "--replay",
+                str(FIXTURE),
+                "--my-slot",
+                bad_slot,
+                "--config",
+                str(REPO_ROOT / "league_config.toml"),
+            ],
+            server=server,
+            out=out,
+        )
+        assert code == 2
+        assert "--my-slot" in out.getvalue()
+        assert "1-12" in out.getvalue()
+    assert server.app is None
 
 
 def test_replay_cli_wires_the_full_stack_with_zero_manual_input():
