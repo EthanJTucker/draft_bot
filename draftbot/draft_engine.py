@@ -210,9 +210,9 @@ def inflation_adjusted_price(row: SheetRow, inflation: float) -> float:
     the tail at sticker while the top deflates, so inside the 111-149
     ramp a worse-ranked player can carry a slightly higher ceiling —
     bounded (at most ~$1 after flooring on a realistic decaying worth
-    curve), never engaged on real data (2025 replay inflation never fell
-    below 0.988), and visible on any record via its inflation and rank
-    fields."""
+    curve), never engaged on real data (across the pinned 2025 replay no
+    position's inflation ever fell below 1.0, at any sale moment), and
+    visible on any record via its inflation and rank fields."""
     discretionary = max(0.0, row.worth - FLOOR_PRICE)
     scaled = discretionary * (1.0 + taper_weight(row.rank) * (inflation - 1.0))
     return _quantize(FLOOR_PRICE + scaled + row.keeper_premium)
