@@ -5,3 +5,4 @@ data/cache/
 *.egg-info/
 .coverage
 data/
+.venv/
