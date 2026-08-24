@@ -155,6 +155,36 @@ class TestHistorySheet:
         ]
         assert build_history_price_sheet(refit, config, season=2025) != baseline
 
+    def test_a_detected_keeper_never_shapes_the_2025_inclusive_fit(self, config):
+        """The keeper-exclusion wiring, observable: on the 2026 sheet
+        (fit years 2023-2025 — the draft-night use this builder exists
+        for) a planted unflagged keeper must leave the sheet identical
+        to omitting the row outright, while the same row one dollar off
+        the chain price must move the fit — so the equality is not
+        vacuous: the row is fit-eligible and only the keeper signature
+        keeps it out. Wiring ``exclude=frozenset()`` in place of the
+        detection path fails the equality (the keeper's chain price
+        reaches the fit).
+
+        The plant: WR 6794 is held by roster 10 in 2024 (slot 4, $50),
+        carries a 2025 ADP, and was not drafted in 2025; a 2025 pick in
+        slot 5 (roster 10 again) at exactly $52 = prior + increment is
+        the league's unflagged-keeper signature. The fixture's own
+        detected keeper — the 2025 PHI DEF — cannot observe this
+        wiring: K/DEF rows never enter the fit for any exclude set.
+        """
+        history = json.loads(HISTORY_FIXTURE.read_text(encoding="utf-8"))
+        baseline = build_history_price_sheet(history, config, season=2026)
+        assert baseline, "the committed fixture prices a non-empty 2026 pool"
+
+        kept = copy.deepcopy(history)
+        kept["picks"]["2025"].append(["6794", "WR", 52, 5])
+        assert build_history_price_sheet(kept, config, season=2026) == baseline
+
+        market = copy.deepcopy(history)
+        market["picks"]["2025"].append(["6794", "WR", 53, 5])
+        assert build_history_price_sheet(market, config, season=2026) != baseline
+
     def test_sheet_rows_are_ranked_prices_for_the_2025_pool(self, config):
         """Every row is a player with a 2025 ADP; ranks are 1..n in price
         order (ties by player id); worth, room price, and value coincide

@@ -255,7 +255,10 @@ class TestReport:
         assert out_path.read_text(encoding="utf-8") == render_report(
             replay["records"], replay["rows"]
         )
-        assert "running MAE" in stream.getvalue()
+        # The actual number next to its label, not just the label: a
+        # summary printing bias where MAE belongs must fail here.
+        run = overall_stats(replay["records"], "running")
+        assert f"running MAE {run.mae:.2f} bias {run.bias:+.2f}" in stream.getvalue()
 
     def test_cli_fails_cleanly_on_a_missing_fixture(self, tmp_path):
         """A bad path is exit code 2 and a message, never a traceback."""
