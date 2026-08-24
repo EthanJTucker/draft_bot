@@ -32,6 +32,13 @@ FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "league_history.js
 #: 2026 player ids used as spot-check anchors (from the fixture snapshot).
 STAFFORD = "421"  # Matthew Stafford, the deep-QB anchor from GAMEPLAN.md
 JAMES_COOK = "8138"  # top-RB anchor whose ADP band holds 6+ real bids
+GIBBS = "9221"  # ADP 1.9: thin band (2 bids), raw curve ~$78.5
+BIJAN = "9509"  # ADP 2.9: thin band (1 bid), raw curve ~$71.5
+MCCAFFREY = "4034"  # ADP 5.8: 4-bid band, curve ~$59.9 (under the cap)
+
+#: The most this room has ever paid for an RB (2023-25 fit bids,
+#: keeper rows excluded): CMC $66, twice.
+MAX_RB_BID = 66.0
 
 
 def _rebuild_seasons(fixture):
@@ -162,6 +169,42 @@ class TestVerifiedSpotChecks:
         assert 47.0 <= room <= 57.0
         assert len(history.prices.band_amounts("RB", adp)) >= 6
         assert abs(room - curve) > 1.0  # the curve did not sneak through
+
+
+class TestCurveCapOnRealHistory:
+    """The top-of-board cap decision (2026-08-23) on the real fit: thin-band
+    curve fallbacks never exceed the position's max observed bid."""
+
+    def test_top_rb_curve_fallbacks_cap_at_the_rb_record(self, history):
+        """Gibbs and Bijan price off thin-band curve fallbacks that
+        extrapolate past $66 — the most this room has EVER paid for an
+        RB — so both cap at exactly $66, labeled honestly."""
+        for player_id in (GIBBS, BIJAN):
+            adp = history.seasons[2026][player_id].adp
+            assert adp <= 3.0  # anchor guard: a top-3 pick by 2026 ADP
+            assert history.prices.curve_price("RB", adp) > MAX_RB_BID
+            assert history.prices.room_price("RB", adp) == MAX_RB_BID
+            assert history.prices.price_source("RB", adp) == "curve_capped"
+
+    def test_mid_board_curve_fallback_is_not_capped(self, history):
+        """McCaffrey's 4-bid band still falls back to the curve, but the
+        curve (~$59.9) sits under the $66 cap and passes through."""
+        adp = history.seasons[2026][MCCAFFREY].adp
+        room = history.prices.room_price("RB", adp)
+        assert history.prices.price_source("RB", adp) == "curve"
+        assert room == pytest.approx(history.prices.curve_price("RB", adp))
+        assert 55.0 <= room < MAX_RB_BID
+
+    def test_no_room_price_exceeds_the_positions_top_bid(self, history):
+        """Sheet-wide honesty: for every 2026 player at a fit position,
+        the room price never exceeds the most the room has paid there."""
+        max_bid = {}
+        for bid in history.bids:
+            max_bid[bid.position] = max(max_bid.get(bid.position, 0.0), bid.amount)
+        for row in history.seasons[2026].values():
+            if row.position in max_bid:
+                room = history.prices.room_price(row.position, row.adp)
+                assert room <= max_bid[row.position], (row.player_id, room)
 
 
 class TestTransitionPopulation:

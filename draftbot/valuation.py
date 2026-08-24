@@ -4,7 +4,9 @@ Room price is the empirical median of the league's own 2023-25 winning bids
 within a position/ADP band; the per-position log curve ``a + b*ln(adp)`` fit
 on the same bids prices a player ONLY when the band holds fewer than six
 samples (verification showed the raw curve overprices top RBs and deep QBs;
-band medians are authoritative wherever they exist).
+band medians are authoritative wherever they exist). Curve fallbacks are
+capped at the position's max observed bid — the room has never paid more
+than its own record, and an extrapolated curve must not claim it will.
 
 This module is pure data-in, dollars-out: no network, no draft state.
 """
@@ -31,6 +33,11 @@ BAND_RATIO = 1.6
 
 #: Bands with fewer samples than this fall back to the fitted log curve.
 MIN_BAND_SAMPLES = 6
+
+#: Cap curve-fallback prices at the position's max observed bid (decided
+#: 2026-08-23: the room has never paid more than its own record at a
+#: position, and an extrapolated curve must not claim it will).
+CURVE_CAP = True
 
 #: Nobody sells below the $1 minimum bid.
 FLOOR_PRICE = 1.0
@@ -189,12 +196,22 @@ class PriceModel:
     """Room prices from the league's own bid history.
 
     ``room_price`` is the one number the rest of the bot consumes: band
-    median when the band has enough samples, fitted log curve otherwise,
-    $1 when the player has no ADP or the position has no history.
+    median when the band has enough samples; otherwise the fitted log
+    curve, capped at the position's max observed bid; $1 when the player
+    has no ADP or the position has no history.
     """
 
-    def __init__(self, bids: Sequence[Bid]):
+    def __init__(
+        self,
+        bids: Sequence[Bid],
+        band_ratio: float = BAND_RATIO,
+        min_band_samples: int = MIN_BAND_SAMPLES,
+        curve_cap: bool = CURVE_CAP,
+    ):
         valid = [bid for bid in bids if _valid_adp(bid.adp)]
+        self._band_ratio = band_ratio
+        self._min_band_samples = min_band_samples
+        self._curve_cap = curve_cap
         # Sorted storage keeps every downstream median independent of the
         # caller's bid ordering (determinism rule).
         self._bids = sorted(valid, key=lambda b: (b.position, b.adp, b.amount))
@@ -204,12 +221,20 @@ class PriceModel:
             )
             for position in sorted({bid.position for bid in self._bids})
         }
+        # PER-POSITION max over the SAME fit population as the bands
+        # (keeper rows are already excluded by build_bids): the cap on
+        # curve extrapolations.
+        self._max_bids = {
+            position: max(bid.amount for bid in self._bids if bid.position == position)
+            for position in sorted({bid.position for bid in self._bids})
+        }
 
     def band_amounts(self, position: str, adp: float | None) -> list[float]:
-        """Winning bids for ``position`` with ADP in adp/1.6 .. adp*1.6."""
+        """Winning bids for ``position`` with ADP in adp/ratio .. adp*ratio
+        (ratio 1.6 unless configured otherwise), inclusive."""
         if not _valid_adp(adp):
             return []
-        low, high = adp / BAND_RATIO, adp * BAND_RATIO
+        low, high = adp / self._band_ratio, adp * self._band_ratio
         return [
             bid.amount
             for bid in self._bids
@@ -217,33 +242,54 @@ class PriceModel:
         ]
 
     def curve_price(self, position: str, adp: float | None) -> float:
-        """The fitted log-curve price, floored at $1."""
+        """The RAW fitted log-curve price, floored at $1 — diagnostic only:
+        never capped, so ``room_price`` may sit below it."""
         curve = self._curves.get(position)
         if not _valid_adp(adp) or curve is None:
             return FLOOR_PRICE
         intercept, slope = curve
         return max(FLOOR_PRICE, intercept + slope * math.log(adp))
 
+    def _curve_fallback(self, position: str, adp: float) -> tuple[float, str]:
+        """Curve-fallback price with its honest label: "curve" straight off
+        the fitted line, "curve_capped" when the position's max observed
+        bid binds, "curve_floor" when the extrapolation fell below $1, and
+        "floor" when the position has no fittable curve at all."""
+        curve = self._curves.get(position)
+        if curve is None:
+            return FLOOR_PRICE, "floor"
+        intercept, slope = curve
+        price = _quantize(intercept + slope * math.log(adp))
+        cap = _quantize(float(self._max_bids[position]))
+        if self._curve_cap and price > cap:
+            return cap, "curve_capped"
+        if price < FLOOR_PRICE:
+            return FLOOR_PRICE, "curve_floor"
+        return price, "curve"
+
     def room_price(self, position: str, adp: float | None) -> float:
-        """What this room pays: band median, curve fallback, $1 floor."""
+        """What this room pays: band median, capped-curve fallback, $1
+        floor. Band medians are never capped (they cannot exceed the
+        position max by construction)."""
         if not _valid_adp(adp):
             return FLOOR_PRICE
         band = self.band_amounts(position, adp)
-        if len(band) >= MIN_BAND_SAMPLES:
+        if len(band) >= self._min_band_samples:
             return float(statistics.median(band))
-        return self.curve_price(position, adp)
+        return self._curve_fallback(position, adp)[0]
 
     def price_source(self, position: str, adp: float | None) -> str:
-        """Which rule priced this player: "band", "curve", or "floor".
+        """Which rule priced this player: "band", "curve", "curve_capped",
+        "curve_floor", or "floor".
 
-        Mirrors :meth:`room_price` exactly — the band wins first, and a
-        position with no fittable curve falls to the $1 floor.
+        Mirrors :meth:`room_price` exactly — both delegate the fallback to
+        the same helper, so price and label cannot drift apart.
         """
         if not _valid_adp(adp):
             return "floor"
-        if len(self.band_amounts(position, adp)) >= MIN_BAND_SAMPLES:
+        if len(self.band_amounts(position, adp)) >= self._min_band_samples:
             return "band"
-        return "curve" if self._curves.get(position) is not None else "floor"
+        return self._curve_fallback(position, adp)[1]
 
 
 #: Share of each FLEX slot assumed to go to RB/WR/TE when computing how

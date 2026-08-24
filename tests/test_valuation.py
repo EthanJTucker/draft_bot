@@ -269,14 +269,72 @@ class TestCurveFallback:
         )
 
     def test_curve_never_prices_below_one_dollar(self):
-        """Deep ADP would extrapolate negative; $1 is the floor."""
+        """Deep ADP would extrapolate negative; $1 is the floor — and the
+        source says so honestly ("curve_floor", not a fitted "curve")."""
         model = PriceModel(_bids("QB", self.LINE_PAIRS))
         assert model.room_price("QB", 5000.0) == 1.0
+        assert model.price_source("QB", 5000.0) == "curve_floor"
 
     def test_unfittable_position_prices_at_the_floor(self):
         """A position with no bid history (K, DEF) has no curve: $1."""
         model = PriceModel(_bids("QB", self.LINE_PAIRS))
         assert model.room_price("K", 30.0) == 1.0
+        assert model.price_source("K", 30.0) == "floor"
+
+
+class TestCurveCap:
+    """Curve-fallback prices are capped at the position's max observed bid
+    (decided 2026-08-23: the room has never paid more than its own record
+    at a position, and an extrapolated curve must not claim it will)."""
+
+    # RB curve through ($20 @ adp 10, $5 @ adp 20) extrapolates to ~$69.8
+    # at adp 1 — far past the $20 the room has ever paid for an RB.
+    RB_PAIRS = [(10.0, 20.0), (20.0, 5.0)]
+
+    def test_cap_binds_when_the_curve_passes_the_positions_top_bid(self):
+        model = PriceModel(_bids("RB", self.RB_PAIRS))
+        assert model.curve_price("RB", 1.0) > 20.0  # the raw curve is wild
+        assert model.room_price("RB", 1.0) == 20.0
+        assert model.price_source("RB", 1.0) == "curve_capped"
+
+    def test_cap_is_per_position_not_global(self):
+        """Anti-cheat: WR history holds $100 bids, so a min over ALL
+        positions' bids leaves the ~$69.8 RB curve uncapped and fails;
+        the cap must be the RB max ($20)."""
+        wr = _bids("WR", [(50.0, 100.0)] * 6)
+        model = PriceModel(_bids("RB", self.RB_PAIRS) + wr)
+        assert 20.0 < model.curve_price("RB", 1.0) < 100.0  # the trap is live
+        assert model.room_price("RB", 1.0) == 20.0
+        assert model.price_source("RB", 1.0) == "curve_capped"
+
+    def test_curve_below_the_cap_is_untouched_and_labeled_curve(self):
+        """adp 15 sits between the fit bids: the curve reads ~$12.4, under
+        the $20 cap, and passes through unchanged."""
+        model = PriceModel(_bids("RB", self.RB_PAIRS))
+        assert model.curve_price("RB", 15.0) < 20.0
+        assert model.room_price("RB", 15.0) == pytest.approx(
+            model.curve_price("RB", 15.0)
+        )
+        assert model.price_source("RB", 15.0) == "curve"
+
+    def test_cap_can_be_disabled(self):
+        """curve_cap=False restores the raw fitted curve (the pre-decision
+        behavior, kept reachable through config)."""
+        model = PriceModel(_bids("RB", self.RB_PAIRS), curve_cap=False)
+        assert model.room_price("RB", 1.0) == pytest.approx(
+            model.curve_price("RB", 1.0)
+        )
+        assert model.price_source("RB", 1.0) == "curve"
+
+    def test_band_median_is_never_capped(self):
+        """A 6-sample band prices at its median with source "band" even
+        when the median IS the position's top bid — the cap applies only
+        to curve fallbacks (a band median cannot exceed the position max
+        by construction; this pins that the plumbing agrees)."""
+        pairs = [(9.0, 66.0), (9.5, 66.0), (10.0, 66.0)] * 2
+        model = PriceModel(_bids("RB", pairs))
+        assert model.room_price("RB", 10.0) == 66.0
+        assert model.price_source("RB", 10.0) == "band"
 
 
 class TestWorth:
