@@ -9,11 +9,16 @@ returns a detectably wrong value.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from draftbot.draft_engine import (
+    BENCH_RETENTION,
     MARGIN_BASE,
+    MARGIN_MIN,
     MARGIN_SLOPE,
+    TierStatus,
     analyze_player,
     build_tiers,
     inflation_adjusted_price,
@@ -226,6 +231,22 @@ class TestMarginalNeed:
         assert marginal_lineup_worth("ghost", [], self._rows(), slots) == 0.0
         assert marginal_lineup_worth("qb15", ["ghost"], self._rows(), slots) == 15.0
 
+    def test_lineup_ranking_and_totals_use_worth_not_value(self, slots):
+        """Anti-cheat for the worth/value swap: qbB's keeper premium makes
+        his VALUE the position's best (\\$15) while his WORTH stays worst
+        (\\$9). The lineup solver prices this season only — qbB alone is
+        marginal for his \\$9 worth, and qb15 over the worth-best incumbent
+        qbA is a \\$3 upgrade. A value-ranked solver reports \\$15 for the
+        first (next season's premium leaking into this season's lineup)
+        and \\$0 for the second (it already seated qbB as the starter)."""
+        rows = [
+            sheet_row(1, "qb15", "QB", 15.0),
+            sheet_row(2, "qbA", "QB", 12.0),
+            sheet_row(3, "qbB", "QB", 9.0, premium=6.0),
+        ]
+        assert marginal_lineup_worth("qbB", [], rows, slots) == 9.0
+        assert marginal_lineup_worth("qb15", ["qbA", "qbB"], rows, slots) == 3.0
+
 
 class TestInflationAdjustedPrice:
     """The multiplier's application, floor-safe and tapered."""
@@ -304,6 +325,16 @@ class TestSpendSchedule:
         board = make_board({1: 5, 2: 30}, drafted_slots=0)
         assert spend_schedule(board, 1, _inflation_rows(), {}) == (0.0, 0.0)
 
+    def test_broke_stack_margin_floors_at_margin_min(self):
+        """Anti-cheat for a dropped ``MARGIN_MIN``: my \\$10 per open slot
+        against the room's \\$50 puts the raw schedule at 0.05 — a
+        5%-of-value bid on players a broke stack still needs. The floor
+        must hold the margin at 0.85 instead."""
+        board = make_board({1: 20, 2: 100}, drafted_slots=2)
+        margin, _ = spend_schedule(board, 1, _inflation_rows(), {"RB": 1.0, "WR": 1.0})
+        assert margin == MARGIN_MIN
+        assert margin == pytest.approx(0.85)
+
 
 def _league_rows():
     """A small but league-shaped sheet: every drafted position present,
@@ -328,6 +359,21 @@ def _league_rows():
         sheet_row(17, "def2", "DEF", 2.0),
         sheet_row(160, "rbtail", "RB", 4.0),
         sheet_row(161, "wrtail", "WR", 4.0),
+    ]
+
+
+def _premium_rows():
+    """A sheet where the nominee's keeper premium is the interesting
+    number: qbP is worth $10 THIS season carrying a $6 premium (value 16),
+    behind qb12 and ahead of qb9. The whole pool's discretionary worth is
+    $96, which the premium tests' two $54 budgets match exactly, so every
+    inflation ratio sits at 1.0 and the layered prices stay hand-checkable."""
+    return [
+        sheet_row(1, "wr40", "WR", 40.0),
+        sheet_row(2, "wr30", "WR", 30.0),
+        sheet_row(3, "qb12", "QB", 12.0),
+        sheet_row(4, "qbP", "QB", 10.0, premium=6.0),
+        sheet_row(5, "qb9", "QB", 9.0),
     ]
 
 
@@ -458,6 +504,68 @@ class TestAnalyzePlayer:
         with pytest.raises(ValueError, match="roster"):
             analyze_player("rb40", _league_rows(), board, config)
 
+    def test_max_bid_floors_the_fraction_never_rounds(self, config):
+        """Anti-cheat for the rounding mutant: this fixture's
+        ``spend_adjusted`` lands at 27.97 — fractional part above one
+        half — so flooring gives 27 while rounding would ship a
+        $1-too-high live bid of 28. The guard assert keeps the fixture
+        honest: if it ever drifts below .5, floor and round agree and
+        the test stops distinguishing them."""
+        analysis = analyze_player(
+            "rb2", _inflation_rows(), _par_board(), config, my_slot=1
+        )
+        assert analysis.spend_adjusted == pytest.approx(27.97)
+        assert analysis.spend_adjusted - math.floor(analysis.spend_adjusted) >= 0.5
+        assert analysis.max_bid == 27
+        assert analysis.max_bid == math.floor(analysis.spend_adjusted)
+
+    def test_scarce_premium_player_keeps_the_whole_premium_once(self, config):
+        """Anti-cheat for the premium double-count: with my QB slot open,
+        qbP is fully marginal (multiplier 1) and the need layer must hand
+        back exactly the inflation-adjusted price — floor + (16 - 1 - 6)
+        * 1 + premium = \\$16 — never the premium added on top again
+        (\\$22). The board's \\$96 of money matches the \\$96 pool, so every
+        ratio sits at exactly 1.0 and the numbers stay hand-checkable."""
+        board = make_board({1: 54, 2: 54}, drafted_slots=6)
+        analysis = analyze_player("qbP", _premium_rows(), board, config, my_slot=1)
+        assert analysis.inflation == pytest.approx(1.0)
+        assert analysis.inflation_adjusted == pytest.approx(16.0)
+        assert analysis.marginal_worth == 10.0
+        assert analysis.need_adjusted == pytest.approx(16.0)
+        assert analysis.need_bump == 0.0
+
+    def test_redundant_premium_player_discounts_worth_but_not_premium(self, config):
+        """The bench-retention discount applies to this season's inflated
+        worth only: with the better qb12 already mine, qbP's marginal
+        worth is 0 and his price is floor + (16 - 1 - 6) * 0.25 + 6 =
+        \\$9.25. The double-count mutant says \\$10.75; the worth/value
+        swap calls qbP a \\$4 upgrade over qb12 and says \\$11.95."""
+        board = make_board({1: 54, 2: 54}, [Sale("qb12", 12, 1)], drafted_slots=6)
+        analysis = analyze_player("qbP", _premium_rows(), board, config, my_slot=1)
+        assert analysis.inflation == pytest.approx(1.0)
+        assert analysis.marginal_worth == 0.0
+        assert analysis.need_adjusted == pytest.approx(
+            1.0 + (16.0 - 1.0 - 6.0) * BENCH_RETENTION + 6.0
+        )
+        assert analysis.need_adjusted == pytest.approx(9.25)
+        assert analysis.need_bump == pytest.approx(-6.75)
+
+    def test_golden_quantized_values_pin_the_ten_decimal_grid(self, config):
+        """Determinism beyond a self-comparison: these literals are the
+        ten-decimal quantized values for a board whose RB ratio repeats
+        in decimal (28/48). Removing or loosening ``_quantize`` changes
+        the reprs — a drift the double-run tests can never see, because
+        both runs drift together."""
+        board = _par_board([Sale("rb1", 60, 2)])
+        analysis = analyze_player("rb2", _inflation_rows(), board, config, my_slot=1)
+        assert repr(analysis.inflation) == "0.5833333333"
+        assert repr(analysis.inflation_adjusted) == "17.9166666657"
+        assert repr(analysis.need_adjusted) == "17.9166666657"
+        assert repr(analysis.spend_margin) == "2.4133333333"
+        assert repr(analysis.spend_boost) == "3.8636363638"
+        assert repr(analysis.spend_adjusted) == "45.6891919165"
+        assert analysis.max_bid == 45
+
     def test_double_run_is_byte_identical(self, config):
         """Determinism: the same inputs analyzed twice produce equal
         records with identical reprs, for every player on the sheet."""
@@ -473,6 +581,77 @@ class TestAnalyzePlayer:
         first, second = sweep(), sweep()
         assert first == second
         assert [repr(item) for item in first] == [repr(item) for item in second]
+
+
+class TestAnalyzePlayerKeepers:
+    """Keeper plumbing through the entry point: ``keepers_by_slot`` must
+    reach every layer — roster need, tiers, inflation, and the pace
+    boost. This is a keeper league, so keepers populated is the actual
+    draft-night configuration; each test here fails under a mutant that
+    drops the keepers from exactly one of those hand-offs."""
+
+    def test_kept_starters_make_the_same_position_redundant(self, config):
+        """Anti-cheat for keepers dropped from the OWNED list: my two
+        kept QBs must reach the need layer, so a nominated third QB is
+        fully redundant (marginal 0, bench-retention price). A mutant
+        that forgets them prices him as a scarce starter instead."""
+        board = make_board(
+            {1: 111, 3: 111, 7: 111}, drafted_slots=8, keeper_counts={7: 2}
+        )
+        kept = analyze_player(
+            "qb8",
+            _league_rows(),
+            board,
+            config,
+            my_slot=7,
+            keepers_by_slot={7: ("qb12", "qb9")},
+        )
+        assert kept.marginal_worth == 0.0
+        assert kept.need_bump < 0.0
+        assert kept.need_adjusted == pytest.approx(
+            1.0 + (kept.inflation_adjusted - 1.0) * BENCH_RETENTION
+        )
+
+    def test_kept_tier_mate_shrinks_the_tier_and_fires_the_flag(self, config):
+        """Anti-cheat for tiers built over the full sheet: with rb40
+        kept, the two-man top RB tier collapses to rb38 alone, so
+        nominating rb38 on a fresh board fires ``last_of_tier``. A
+        mutant that tiers over all rows still sees two members — the
+        unsold-but-unbuyable rb40 suppresses the alarm on the survivor."""
+        rows = [
+            sheet_row(1, "rb40", "RB", 40.0),
+            sheet_row(2, "rb38", "RB", 38.0),
+            sheet_row(3, "wr40", "WR", 40.0),
+            sheet_row(4, "rb25", "RB", 25.0),
+            sheet_row(5, "wr30", "WR", 30.0),
+        ]
+        board = make_board({1: 60, 3: 60, 7: 60}, drafted_slots=8, keeper_counts={3: 1})
+        analysis = analyze_player(
+            "rb38", rows, board, config, my_slot=7, keepers_by_slot={3: ("rb40",)}
+        )
+        assert analysis.tier == TierStatus(
+            tier=1, size=1, remaining=1, last_of_tier=True
+        )
+
+    def test_inflation_and_pace_boost_price_the_keeper_excluded_pool(self, config):
+        """Anti-cheat for keepers dropped from the ratio or the pace
+        pool: the kept \\$6 RB is not buyable, so \\$14 of room money over
+        the \\$5 keeper-excluded pool inflates RB to 2.8 (1.4 if the kept
+        row stays in the denominator), and the boostable pool prices at
+        \\$16, leaving my \\$12 a 2/3-dollar per-slot surplus (a mutant
+        that leaves the kept row in the pace pool sees \\$31 of pool and
+        no surplus at all)."""
+        rows = [
+            sheet_row(1, "a", "RB", 6.0),
+            sheet_row(2, "b", "RB", 5.0),
+            sheet_row(3, "c", "RB", 2.0),
+        ]
+        board = make_board({1: 12, 2: 5}, drafted_slots=2, keeper_counts={2: 1})
+        analysis = analyze_player(
+            "b", rows, board, config, my_slot=1, keepers_by_slot={2: ("a",)}
+        )
+        assert analysis.inflation == pytest.approx(2.8)
+        assert analysis.spend_boost == pytest.approx(2 / 3)
 
 
 def test_taper_weight_full_fade_and_endpoints():
@@ -529,6 +708,27 @@ class TestTiers:
         alone = tier_status("rb2", tiers, sold=frozenset({"rb1"}))
         assert alone.remaining == 1
         assert alone.last_of_tier is True
+
+        # The third direction — one LATE: rb2 himself just sold while
+        # rb1 still sits on the board, so exactly one member remains but
+        # the flag must stay off for the already-sold nominee. A guard
+        # reduced to ``remaining == 1`` fires here and corrupts every
+        # just-sold record the backtest and dashboard consume.
+        himself_sold = tier_status("rb2", tiers, sold=frozenset({"rb2"}))
+        assert himself_sold.remaining == 1
+        assert himself_sold.last_of_tier is False
+
+    def test_cheap_board_gaps_need_the_absolute_floor_too(self):
+        """Anti-cheat for the relative-only mutant: late-draft values
+        5.0 / 4.3 / 3.7 gap by more than 12% of the richer value but
+        well under the \\$2 absolute floor — one tier, never three fake
+        singletons each flashing a last-of-tier "jump now" signal."""
+        rows = [
+            sheet_row(1, "te5", "TE", 5.0),
+            sheet_row(2, "te43", "TE", 4.3),
+            sheet_row(3, "te37", "TE", 3.7),
+        ]
+        assert build_tiers(rows)["TE"] == (("te5", "te43", "te37"),)
 
     def test_tier_counts_ignore_other_tiers_and_other_positions(self):
         """Selling out the whole top RB tier and a WR must not flag a
