@@ -162,3 +162,36 @@ Unit tests never touch the live network. The client's transport is injectable,
 and the suite includes traps for Sleeper's known gotchas: CDN cache-busting on
 every poll, bid amounts arriving as strings, purchase attribution by draft
 slot, and the pause flag freezing the draft timer.
+
+## Dashboard
+
+```
+python -m draftbot.dashboard --replay tests/fixtures/draft_2025.json --accelerate 4
+```
+
+Serves one auto-refreshing page at `http://127.0.0.1:8724` from a `/state`
+JSON endpoint, polled once per cycle (~1s live; `--accelerate` divides the
+interval in replay). The top bar shows the nominated player, current high
+bid, worth, room price, my max bid, a plain BID/PASS verdict (BID exactly
+when the high bid is below my max; equality can only match, so it is
+PASS), profit as price-minus-value centered at $0, and the last-of-tier
+warning. Below it: the sortable/filterable positional table of remaining
+players, every team's budget as remaining dollars (never spent) with open
+slots and max possible bid, and my roster and remaining budget pinned.
+Fail-closed rendering: an untrusted picks feed or a paused draft shows a
+banner and suppresses the verdict, a source outage keeps serving the last
+good state labeled as such, and a nomination pointer naming a just-sold
+player is priced against the pre-sale board and labeled final. If
+nomination metadata is missing entirely, values, budgets, and sold players
+still render from picks polling.
+
+The replay command above needs nothing but the checked-in fixture: it
+derives a demo sheet from the replay's own hammer prices (so profit reads
+$0 and the bargain-margin bot rationally PASSes every lot; the layout is
+the point). Pass `--sheet data/value_sheet_2026.csv` to price the replay
+against a real value sheet instead, with varying profits and verdicts.
+Live mode (no `--replay`) requires `--sheet` and pulls keeper lists from
+the league's rosters at startup. Options: `--config`, `--cache-dir`,
+`--host`, `--port`, `--interval`, `--accelerate`, `--my-slot` (defaults
+to the config's roster id resolved against the draft). Exit codes: 0
+served and shut down cleanly, 2 nothing ran.
