@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
-from draftbot.tracker import BoardState
+from draftbot.tracker import FLEX_ELIGIBLE, BoardState
 from draftbot.valuation import FLOOR_PRICE, SheetRow
 
 #: Inflation applies in full down to this sheet rank...
@@ -150,6 +150,55 @@ def positional_inflation(
         ratio = (budgeted - spent.get(position, 0.0)) / left
         inflation[position] = _quantize(max(INFLATION_MIN, min(INFLATION_MAX, ratio)))
     return inflation
+
+
+def best_lineup_worth(
+    owned: Sequence[str],
+    rows: Sequence[SheetRow],
+    roster_slots: Mapping[str, int],
+) -> float:
+    """The summed worth of the best legal STARTING lineup from ``owned``.
+
+    Dedicated slots first (each position's best players fill its own
+    slots), then the best leftover RB/WR/TE fill the FLEX slots — optimal
+    for this roster shape, because a dedicated slot always prefers its
+    own position's best and FLEX accepts any leftover. Bench never
+    scores: that is exactly what makes a redundant player worth ~0 here.
+    Players the sheet does not price contribute nothing.
+    """
+    rows_by_id = {row.player_id: row for row in rows}
+    by_position: dict[str, list[tuple[float, str]]] = {}
+    for player_id in sorted(set(owned)):
+        row = rows_by_id.get(player_id)
+        if row is not None:
+            by_position.setdefault(row.position, []).append(
+                (-_quantize(row.worth), player_id)
+            )
+    total = 0.0
+    flex_pool: list[tuple[float, str]] = []
+    for position in sorted(by_position):
+        players = sorted(by_position[position])
+        starters = roster_slots.get(position, 0)
+        total += sum(-worth for worth, _ in players[:starters])
+        if position in FLEX_ELIGIBLE:
+            flex_pool.extend(players[starters:])
+    flex_slots = roster_slots.get("FLEX", 0)
+    total += sum(-worth for worth, _ in sorted(flex_pool)[:flex_slots])
+    return _quantize(total)
+
+
+def marginal_lineup_worth(
+    player_id: str,
+    owned: Sequence[str],
+    rows: Sequence[SheetRow],
+    roster_slots: Mapping[str, int],
+) -> float:
+    """Best lineup with the player minus best lineup without him — the
+    decided need measure. A third QB adds ~0; a player filling an open
+    starting slot adds his full worth; an upgrade adds the difference."""
+    with_player = best_lineup_worth([*owned, player_id], rows, roster_slots)
+    without = best_lineup_worth(owned, rows, roster_slots)
+    return _quantize(with_player - without)
 
 
 @dataclass(frozen=True)

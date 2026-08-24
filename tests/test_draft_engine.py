@@ -13,6 +13,7 @@ import pytest
 
 from draftbot.draft_engine import (
     build_tiers,
+    marginal_lineup_worth,
     positional_inflation,
     taper_weight,
     tier_status,
@@ -147,6 +148,84 @@ class TestPositionalInflation:
         board = _par_board([Sale("rb1", 60, 2)])
         assert positional_inflation(with_premium, board) == positional_inflation(
             _inflation_rows(), board
+        )
+
+
+#: The real league's drafted roster shape (IR is extra, not drafted).
+_SLOTS = {
+    "QB": 1,
+    "RB": 2,
+    "WR": 2,
+    "TE": 1,
+    "FLEX": 1,
+    "K": 1,
+    "DEF": 1,
+    "BN": 6,
+    "IR": 2,
+}
+
+
+class TestMarginalNeed:
+    """Roster need is a lineup-value difference, never a quota count."""
+
+    @staticmethod
+    def _rows():
+        return [
+            sheet_row(1, "wr40", "WR", 40.0),
+            sheet_row(2, "wr35", "WR", 35.0),
+            sheet_row(3, "rb30", "RB", 30.0),
+            sheet_row(4, "wr30", "WR", 30.0),
+            sheet_row(5, "rb25", "RB", 25.0),
+            sheet_row(6, "rb20", "RB", 20.0),
+            sheet_row(7, "qb15", "QB", 15.0),
+            sheet_row(8, "qb12", "QB", 12.0),
+            sheet_row(9, "qb9", "QB", 9.0),
+            sheet_row(10, "qb8", "QB", 8.0),
+            sheet_row(11, "rb15", "RB", 15.0),
+            sheet_row(12, "def2", "DEF", 2.0),
+        ]
+
+    def test_scarce_starting_slot_is_fully_marginal(self):
+        """With no QB owned, a QB's whole worth is lineup-marginal."""
+        assert marginal_lineup_worth("qb15", [], self._rows(), _SLOTS) == 15.0
+
+    def test_third_qb_marginal_value_is_zero(self):
+        """Acceptance: two better QBs already fill the only QB slot, and a
+        QB cannot ride the FLEX, so a third adds exactly nothing."""
+        owned = ["qb12", "qb9"]
+        assert marginal_lineup_worth("qb8", owned, self._rows(), _SLOTS) == 0.0
+
+    def test_upgrade_is_partially_marginal(self):
+        """Anti-cheat for the quota-count mutant: my QB slot is filled,
+        but the candidate beats the incumbent by \\$3 — the marginal value
+        is exactly that \\$3, not zero (quota says the slot is full) and
+        not \\$15 (a slot-open check says the position is scarce)."""
+        assert marginal_lineup_worth("qb15", ["qb12"], self._rows(), _SLOTS) == 3.0
+
+    def test_flex_keeps_a_third_rb_fully_marginal(self):
+        """Two RBs fill the dedicated slots; the third slides into the
+        open FLEX at his full worth."""
+        owned = ["rb30", "rb20"]
+        assert marginal_lineup_worth("rb25", owned, self._rows(), _SLOTS) == 25.0
+
+    def test_flex_competition_prices_the_displacement(self):
+        """Anti-cheat for FLEX handling: three good WRs already own the
+        WR slots plus the FLEX. Adding rb25 upgrades the flex from wr30
+        to... nothing: rb25 takes a dedicated RB slot over rb20, and the
+        best leftover for FLEX is still wr30 vs the displaced rb20 —
+        lineup gains exactly \\$5 (30+25+40+35+30 = 160 over 155)."""
+        owned = ["rb30", "rb20", "wr40", "wr35", "wr30"]
+        assert marginal_lineup_worth("rb25", owned, self._rows(), _SLOTS) == 5.0
+
+    def test_kicker_and_def_slots_count_too(self):
+        assert marginal_lineup_worth("def2", [], self._rows(), _SLOTS) == 2.0
+
+    def test_off_sheet_players_carry_no_lineup_worth(self):
+        """Both as candidate and as owned filler: a player the sheet does
+        not price contributes zero, never a crash."""
+        assert marginal_lineup_worth("ghost", [], self._rows(), _SLOTS) == 0.0
+        assert (
+            marginal_lineup_worth("qb15", ["ghost"], self._rows(), _SLOTS) == 15.0
         )
 
 
