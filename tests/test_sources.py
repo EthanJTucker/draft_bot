@@ -7,6 +7,8 @@ dashboard through this same seam.
 
 from __future__ import annotations
 
+import pytest
+
 from draftbot.sleeper_client import SleeperClient
 from draftbot.sources import LivePollSource, ReplaySource
 
@@ -65,7 +67,6 @@ def test_replay_mimics_the_stale_nomination_pointer_and_status():
     assert mid.draft.status == "drafting"
     assert mid.draft.nominated_player_id == "A"
     assert mid.draft.highest_offer == "51"
-    assert mid.draft.nominating_slot == "1"
 
     last = source.poll()
     assert last.draft.status == "complete"
@@ -75,6 +76,47 @@ def test_replay_mimics_the_stale_nomination_pointer_and_status():
     assert again.draft.status == "complete"
     assert len(again.picks) == 2
     assert again.stale_endpoints == frozenset()
+
+
+def test_replay_synthesizes_only_what_the_picks_feed_can_know():
+    """Honest wire semantics: the sale's winner IS the high bidder at the
+    hammer, so the winner's slot goes in ``offering_slot`` and the winner's
+    ``picked_by`` (when present) in ``offering_user_id``. The NOMINATOR is
+    unknowable from the picks feed, so ``nominating_slot`` must be None —
+    a replay that fabricates it would let nomination-behavior logic
+    backtest against fiction."""
+    with_ids = raw_auction_pick(1, "A", 1, "51") | {"picked_by": "888"}
+    without_ids = raw_auction_pick(2, "B", 2, "10")
+    source = ReplaySource(_raw_completed_draft(), [with_ids, without_ids])
+    source.poll()  # opening tick, no sales yet
+
+    first_sale = source.poll().draft
+    assert first_sale.offering_slot == "1"
+    assert first_sale.offering_user_id == "888"
+    assert first_sale.nominating_slot is None
+
+    second_sale = source.poll().draft
+    assert second_sale.offering_slot == "2"
+    assert second_sale.offering_user_id is None  # picked_by blank in feed
+    assert second_sale.nominating_slot is None
+
+
+def test_replay_ticks_cannot_be_poisoned_by_a_mutating_consumer():
+    """Replay shares parsed objects across ticks, so the seam relies on
+    the models being read-only: a consumer annotating pick metadata or
+    editing budgets must get a TypeError, not corrupt its own backtest."""
+    source = ReplaySource(_raw_completed_draft(), [raw_auction_pick(1, "A", 1, "51")])
+    source.poll()
+    tick = source.poll()
+
+    with pytest.raises(TypeError):
+        tick.draft.budget_by_slot[1] = 0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        tick.picks[0].metadata["amount"] = "999"  # type: ignore[index]
+
+    repeat = source.poll()  # completed: repeats the finished state
+    assert repeat.draft.budget_by_slot[1] == 133
+    assert repeat.picks[0].metadata["amount"] == "51"
 
 
 def test_live_poll_reports_staleness_per_endpoint_per_tick(config, tmp_path):
