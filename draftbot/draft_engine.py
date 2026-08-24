@@ -8,8 +8,13 @@ on top of the static value sheet, recomputed from scratch on every call:
   tapered away from the cheap tail (measured keeper-league inflation
   concentrates above roughly the 130th player).
 - **Marginal roster need** — best legal lineup with the player minus
-  without, honoring FLEX eligibility; a redundant player prices at bench
-  retention, never at starter value.
+  without, honoring FLEX eligibility. A discount schedule, never a
+  premium: a scarce starter keeps the full inflation-adjusted price,
+  a redundant player is discounted toward bench retention, and the
+  bump is zero or negative by construction. Scarcity pressure itself
+  comes from inflation, the spend schedule, and the last-of-tier flag —
+  a positive roster-side bump on top would double-count what worth and
+  inflation already price.
 - **Spend-down schedule** — a bargain-early margin that rises as my
   money-per-open-slot outpaces the room's, plus a boost that burns money
   the remaining pool can no longer absorb. Never finish with cash.
@@ -124,9 +129,14 @@ def positional_inflation(
     normalization room) in proportion to its share of the initial
     taper-weighted pool; every on-model sale then debits that position's
     money by the dollars paid above the floor while its pool loses the
-    player's sheet value. Off-model sales — flagged by the board or
-    simply absent from the sheet — touch neither side of any ratio, and
-    kept players were never part of the buyable pool at all.
+    player's sheet value. Off-model sales debit no position's money. A
+    sale of a player this sheet does not price touches nothing else
+    either, but a sale the BOARD flags off-model while this sheet still
+    prices the player — a defensive path, unreachable when tracker and
+    engine share one sheet — still removes that player's value from the
+    remaining pool (sold is sold, whatever the price meant), so the
+    denominator and with it the ratio can move. Kept players were never
+    part of the buyable pool at all.
     """
     pool = sorted(
         (row for row in rows if row.player_id not in _keeper_ids(keepers_by_slot)),
@@ -194,7 +204,15 @@ def inflation_adjusted_price(row: SheetRow, inflation: float) -> float:
     never scales, the worth above it scales by the taper-weighted ratio
     (so the $1-5 tail holds its price whatever the top of the board
     does), and the keeper premium — next season's money — rides through
-    untouched in both directions."""
+    untouched in both directions.
+
+    Known deflation-side shape: below par (ratio < 1) the taper holds
+    the tail at sticker while the top deflates, so inside the 111-149
+    ramp a worse-ranked player can carry a slightly higher ceiling —
+    bounded (at most ~$1 after flooring on a realistic decaying worth
+    curve), never engaged on real data (2025 replay inflation never fell
+    below 0.988), and visible on any record via its inflation and rank
+    fields."""
     discretionary = max(0.0, row.worth - FLOOR_PRICE)
     scaled = discretionary * (1.0 + taper_weight(row.rank) * (inflation - 1.0))
     return _quantize(FLOOR_PRICE + scaled + row.keeper_premium)
