@@ -359,6 +359,184 @@ def test_keeper_board_without_keeper_ids_shows_the_error_not_a_number(config):
     assert len(state["teams"]) == 12
 
 
+def test_my_panel_binds_my_remaining_never_my_spent(config):
+    """The my-panel money figure is the number Ethan reads for his own
+    money. Asymmetric fixture: my slot 7 spends $37 of $200, so remaining
+    (163), spent (37), and max bid (150) are three DIFFERENT numbers —
+    binding any wrong field in _me_json fails here."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "RB", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick([raw_auction_pick(1, "A", 7, "37")])]
+    state = make_poller(config, entries, rows).step()
+
+    me = state["me"]
+    assert me["slot"] == 7
+    assert me["remaining"] == 163
+    assert me["max_bid"] == 150  # 163 - 13 held for the other open slots
+    assert me["open_slots"] == 14
+    assert "spent" not in me
+
+
+def test_keeper_wired_poller_prices_and_renders_the_keeper_board(config):
+    """The configuration the real 2026 draft night will use: a non-empty
+    keeper mapping through the poller. The kept player is off the buyable
+    table, pinned on my roster as a keeper at no auction price, the open
+    slots reflect the keeper, and the engine prices a live lot without
+    tripping its keeper guard."""
+    rows = [
+        sheet_row(1, "KP", "RB", 30.0, name="Kept Back"),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick(nominee="B", offer=5)]
+    state = make_poller(config, entries, rows, keepers_by_slot={7: ("KP",)}).step()
+
+    assert [player["player_id"] for player in state["players"]] == ["B", "C"]
+    me = state["me"]
+    assert me["slot"] == 7
+    assert me["open_slots"] == 14  # 15 drafted slots minus the keeper
+    assert me["roster"] == [
+        {
+            "player_id": "KP",
+            "name": "Kept Back",
+            "position": "RB",
+            "price": None,
+            "keeper": True,
+        }
+    ]
+    nomination = state["nomination"]
+    assert nomination["analysis_error"] is None
+    assert nomination["analysis"] is not None
+    assert nomination["verdict"] is not None
+    assert team_by_slot(state, 7)["open_slots"] == 14
+    # And the pre-entry condition banners: a keeper slot with no
+    # budget_<slot> key renders at the default until it is entered.
+    assert any(
+        warning["field"] == "keeper_budgets" for warning in state["settings_warnings"]
+    )
+
+
+def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
+    """The static page binds these exact field names; any rename anywhere
+    in the snapshot (players-row worth, settings_warnings field, roster
+    price, budget_is_default, analysis inflation, and the rest of the
+    class) must fail HERE, not in a browser at draft time. The fixture is
+    rich on purpose: a keeper, a purchase, a live priced nomination with
+    tier and verdict, and a settings warning."""
+    rows = [
+        sheet_row(1, "KP", "RB", 30.0, name="Kept Back"),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "A", "WR", 19.0),
+        sheet_row(4, "C", "QB", 11.0),
+    ]
+    entries = [make_tick([raw_auction_pick(1, "A", 7, "19")], nominee="B", offer=5)]
+    state = make_poller(config, entries, rows, keepers_by_slot={7: ("KP",)}).step()
+
+    assert set(state) == {
+        "ok",
+        "poll_count",
+        "updated_at",
+        "source_error",
+        "status",
+        "paused",
+        "stale_endpoints",
+        "settings_warnings",
+        "timer_end_at",
+        "nomination",
+        "teams",
+        "me",
+        "players",
+        "sales",
+        "off_model_player_ids",
+        "note",
+    }
+    nomination = state["nomination"]
+    assert set(nomination) == {
+        "status",
+        "is_live",
+        "player_id",
+        "name",
+        "position",
+        "high_bid",
+        "nominating_slot",
+        "offering_slot",
+        "analysis",
+        "analysis_error",
+        "pre_sale",
+        "verdict",
+        "verdict_reason",
+        "profit",
+        "last_of_tier",
+    }
+    assert set(nomination["analysis"]) == {
+        "rank",
+        "worth",
+        "room_price",
+        "keeper_premium",
+        "value",
+        "inflation",
+        "inflation_adjusted",
+        "marginal_worth",
+        "need_bump",
+        "spend_margin",
+        "spend_boost",
+        "spend_adjusted",
+        "tier",
+        "my_cap",
+        "max_bid",
+    }
+    assert set(nomination["analysis"]["tier"]) == {
+        "tier",
+        "size",
+        "remaining",
+        "last_of_tier",
+    }
+    assert set(nomination["verdict"]) == {"action", "margin", "basis"}
+    assert state["settings_warnings"], "the rich fixture must carry a warning"
+    assert set(state["settings_warnings"][0]) == {"field", "expected", "actual"}
+    assert set(state["teams"][0]) == {
+        "slot",
+        "roster_id",
+        "remaining",
+        "open_slots",
+        "max_bid",
+        "budget_is_default",
+        "needs",
+        "is_me",
+    }
+    me = state["me"]
+    assert set(me) == {
+        "slot",
+        "remaining",
+        "open_slots",
+        "max_bid",
+        "needs",
+        "roster",
+    }
+    assert len(me["roster"]) == 2  # the keeper AND the purchase shape
+    for entry in me["roster"]:
+        assert set(entry) == {"player_id", "name", "position", "price", "keeper"}
+    assert set(state["players"][0]) == {
+        "rank",
+        "player_id",
+        "name",
+        "position",
+        "worth",
+        "room_price",
+        "value",
+    }
+    assert set(state["sales"][0]) == {
+        "player_id",
+        "name",
+        "position",
+        "amount",
+        "slot",
+    }
+
+
 def test_last_of_tier_binds_to_the_tier_flag_not_a_lookalike(config):
     """The same nominated player flips the warning exactly when his final
     tier-mate sells: unsold tier-mate -> no warning; tier-mate sold ->

@@ -340,15 +340,9 @@ def test_live_mode_wires_roster_keepers_into_the_board(tmp_path):
     me = state["me"]
     assert me["slot"] == 7  # roster 7 resolved through slot_to_roster_id
     assert me["open_slots"] == 14  # 15 drafted slots minus the keeper
-    assert me["roster"] == [
-        {
-            "player_id": "KP",
-            "name": "Kept Back",
-            "position": "RB",
-            "price": None,
-            "keeper": True,
-        }
-    ]
+    keeper_entries = [entry for entry in me["roster"] if entry["keeper"]]
+    assert [entry["player_id"] for entry in keeper_entries] == ["KP"]
+    assert keeper_entries[0]["price"] is None  # kept, not bought
 
 
 def test_cli_exits_2_on_missing_config_or_fixture(tmp_path):
