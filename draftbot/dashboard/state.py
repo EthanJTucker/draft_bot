@@ -47,8 +47,10 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     bid — at equality I could only match, never beat, so equality is PASS.
 
     Fail-closed by rule: no verdict on a paused draft, an untrusted picks
-    feed, a stale (beyond-grace) pointer, or a lot the engine could not
-    price. A just-sold lot (within grace) keeps its verdict as the
+    feed, a stale (beyond-grace) pointer, a lot the engine could not
+    price, or a lot with no recorded high bid (an open lot always carries
+    one; its absence is suspect data, and a fabricated $0 offer would
+    scream BID). A just-sold lot (within grace) keeps its verdict as the
     retrospective call the bot was making when the hammer fell.
     """
     if paused:
@@ -61,12 +63,13 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
         return None, "nomination pointer stale beyond grace; not advising"
     if analysis is None:
         return None, error or "no analysis"
-    offer = 0 if high_bid is None else high_bid
-    action = "BID" if offer < analysis["max_bid"] else "PASS"
+    if high_bid is None:
+        return None, "no recorded high bid for this lot; not advising on suspect data"
+    action = "BID" if high_bid < analysis["max_bid"] else "PASS"
     label = "final" if status == NOMINATION_SOLD_GRACE else "live"
     return {
         "action": action,
-        "margin": analysis["max_bid"] - offer,
+        "margin": analysis["max_bid"] - high_bid,
         "basis": label,
     }, label
 
@@ -204,6 +207,16 @@ class DashboardPoller:
         verdict, reason = _verdict(
             nomination.status, board.paused, nomination.highest_offer, analysis, error
         )
+        if verdict is not None and "draft" in board.stale_endpoints:
+            # The draft object is the ONLY carrier of the nomination
+            # pointer and high bid, and the disk cache has no age limit: a
+            # cache-served draft can name an arbitrarily old lot at an
+            # arbitrarily old price. A verdict computed from it would glow
+            # green under the SERVED FROM CACHE banner. Fail closed.
+            verdict, reason = None, (
+                "draft object served from cache; nomination data may be "
+                "arbitrarily old — not advising"
+            )
         tier = (analysis or {}).get("tier")
         value = (analysis or {}).get("value")
         profit = None

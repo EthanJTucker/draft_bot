@@ -169,6 +169,54 @@ def test_untrusted_nomination_never_carries_a_verdict(config):
     assert state["players"]
 
 
+def test_stale_draft_endpoint_never_carries_a_verdict(config):
+    """One failed GET on /draft (picks fine) serves the nomination pointer
+    and high bid from a disk cache with no age limit: the lot on screen
+    can be arbitrarily old. A confident BID computed from cached money is
+    the fail-open bug; the verdict must be withheld with an honest reason
+    while the board data (values, budgets, table) still renders."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick(nominee="B", offer=1, stale=("draft",))]
+    state = make_poller(config, entries, rows).step()
+
+    nomination = state["nomination"]
+    assert nomination["status"] == "live"  # the picks feed itself is trusted
+    assert nomination["verdict"] is None
+    assert "cache" in nomination["verdict_reason"]
+    assert state["stale_endpoints"] == ["draft"]
+    # The sheet math still shows (it does not depend on the draft object).
+    assert nomination["analysis"] is not None
+    assert state["teams"]
+    assert state["players"]
+
+
+def test_live_lot_with_no_recorded_high_bid_withholds_the_verdict(config):
+    """An open lot always carries a high bid; a live nomination whose
+    draft object has NO highest_offer is suspect data. Pricing it against
+    a fabricated $0 offer would render BID at full margin — the verdict
+    is withheld instead, and profit shows nothing rather than a number
+    computed from an invented price."""
+    rows = [
+        sheet_row(1, "A", "WR", 37.0),
+        sheet_row(2, "B", "WR", 20.0),
+        sheet_row(3, "C", "QB", 11.0),
+    ]
+    entries = [make_tick(nominee="B")]  # nominee present, no offer at all
+    state = make_poller(config, entries, rows).step()
+
+    nomination = state["nomination"]
+    assert nomination["status"] == "live"
+    assert nomination["high_bid"] is None
+    assert nomination["verdict"] is None
+    assert "high bid" in nomination["verdict_reason"]
+    assert nomination["profit"] is None
+    assert nomination["analysis"] is not None  # worth/max-bid still inform
+
+
 def test_paused_draft_never_carries_a_verdict(config):
     """Sleeper's overnight auto-pause freezes the lot; advising into a
     paused draft is the same fail-open bug in a different coat."""
