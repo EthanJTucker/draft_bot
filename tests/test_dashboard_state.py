@@ -427,6 +427,45 @@ def test_sold_nominee_is_priced_on_the_pre_sale_board(config):
     assert lull["nomination"]["analysis"] == nomination["analysis"]
 
 
+def test_recovery_tick_with_extra_sales_refuses_retrospective_pricing(config):
+    """When one observed tick carries the nominee's sale PLUS other sales
+    the dashboard missed (dropped polls), the previous board predates all
+    of them — pricing the nominee against it and labeling it 'pre-sale'
+    would put a several-sales-old number under an honest-looking chip.
+    The refusal path fires instead, and the lull's later ticks repeat it."""
+    rows = [
+        sheet_row(1, "X", "WR", 55.0),
+        sheet_row(2, "A", "RB", 22.0),
+        sheet_row(3, "B", "RB", 20.0),
+    ]
+    recovery_tick = make_tick(
+        # Two sales revealed by the SAME poll: A (missed) then X (nominee).
+        [raw_auction_pick(1, "A", 3, "22", "RB"), raw_auction_pick(2, "X", 7, "60")],
+        nominee="X",
+        offer=60,
+        offering_slot=7,
+    )
+    entries = [make_tick(), recovery_tick, recovery_tick]
+    poller = make_poller(config, entries, rows)
+    poller.step()
+
+    state = poller.step()
+    nomination = state["nomination"]
+    assert nomination["status"] == "sold_between_lots"
+    assert nomination["analysis"] is None
+    assert nomination["pre_sale"] is False
+    assert "2 sales landed in one poll" in nomination["analysis_error"]
+    assert nomination["verdict"] is None
+    # The board itself is current: both sales debited, both players gone.
+    assert team_by_slot(state, 3)["remaining"] == 178
+    assert team_by_slot(state, 7)["remaining"] == 140
+    assert [player["player_id"] for player in state["players"]] == ["B"]
+
+    lull = poller.step()  # the cached refusal holds through the lull
+    assert lull["nomination"]["analysis"] is None
+    assert "2 sales landed in one poll" in lull["nomination"]["analysis_error"]
+
+
 def test_nominee_sold_before_first_look_reports_why_instead_of_pricing(config):
     """Started mid-lull, the dashboard has no pre-sale board for the
     already-sold nominee: it must say so, not reprice the lot on

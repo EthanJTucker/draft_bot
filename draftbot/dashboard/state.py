@@ -265,9 +265,11 @@ class DashboardPoller:
         it stood BEFORE his sale folded in (the engine's own seam
         contract); the result is cached per player so later ticks of the
         same lull reuse it instead of repricing on a post-sale board. A
-        sold nominee with no observed pre-sale board (the dashboard
-        started mid-lull) honestly reports why instead of a wrong number.
-        A live nomination reprices every step — the board under it can
+        sold nominee with no observed pre-sale board — the dashboard
+        started mid-lull, or the observed tick carried other missed sales
+        alongside his (so the previous board predates more than his own
+        hammer) — honestly reports why instead of a wrong number. A live
+        nomination reprices every step — the board under it can
         legitimately move.
         """
         player_id = board.nomination.player_id
@@ -291,6 +293,19 @@ class DashboardPoller:
             error = (
                 "sold before this dashboard observed a pre-sale board; "
                 "not repricing a completed lot on post-sale money"
+            )
+            self._sold_analysis = (player_id, None, False, error)
+            return None, False, error
+        new_sales = sum(1 for sale in board.sales if sale.player_id not in prev_sold)
+        if new_sales > 1:
+            # A recovery tick: this poll revealed other sales alongside
+            # the nominee's, so the previous board predates ALL of them —
+            # not just his hammer. 'Priced pre-sale' off that board would
+            # be a several-sales-old number wearing an honest label.
+            error = (
+                f"{new_sales} sales landed in one poll; the last observed "
+                "board predates more than this lot's own sale — not "
+                "pricing it on money that old"
             )
             self._sold_analysis = (player_id, None, False, error)
             return None, False, error
