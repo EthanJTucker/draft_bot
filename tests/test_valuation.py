@@ -65,6 +65,16 @@ class TestParseProjections:
         rows = [projection_row("101", "RB", 7.5, name="Jahmyr Gibbs")]
         assert parse_projections(rows)["101"].name == "Jahmyr Gibbs"
 
+    def test_no_adp_sentinel_normalizes_to_none(self):
+        """Sleeper's 999.0 means "no ADP": the sentinel becomes None at
+        parse time, so no downstream consumer (the emitted CSV included)
+        ever sees the magic number. A real ADP passes through untouched."""
+        season = parse_projections(
+            [projection_row("101", "RB", 999.0), projection_row("102", "RB", 7.5)]
+        )
+        assert season["101"].adp is None
+        assert season["102"].adp == 7.5
+
 
 class TestBuildBids:
     """Historical winning bids get tagged with THAT season's ADP."""

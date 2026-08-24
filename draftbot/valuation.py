@@ -40,6 +40,14 @@ def _valid_adp(adp: float | None) -> bool:
     return adp is not None and adp != NO_ADP_SENTINEL and adp > 0
 
 
+def _normalize_adp(adp: float | None) -> float | None:
+    """Sleeper's 999.0 sentinel means "no ADP": normalize it to None at
+    parse time so no downstream consumer (the emitted CSV included) ever
+    sees the magic number. ``_valid_adp`` still rejects the sentinel as
+    defense in depth for callers that bypass the parser."""
+    return None if adp == NO_ADP_SENTINEL else adp
+
+
 @dataclass(frozen=True)
 class SeasonRow:
     """One player's row from one season's projections file.
@@ -70,7 +78,7 @@ def parse_projections(rows: Sequence[dict]) -> dict[str, SeasonRow]:
         season[player_id] = SeasonRow(
             player_id=player_id,
             position=player.get("position"),
-            adp=stats.get("adp_half_ppr"),
+            adp=_normalize_adp(stats.get("adp_half_ppr")),
             points=stats.get("pts_half_ppr"),
             years_exp_snapshot=player.get("years_exp"),
             name=name,

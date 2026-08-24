@@ -96,6 +96,9 @@ def _payloads():
         _proj("qb1", "QB", 40.0, 300.0),
         _proj("qb2", "QB", 60.0, 200.0),
         _proj("qb3", "QB", None, 100.0),
+        # 999.0 is Sleeper's no-ADP sentinel: qb4 prices at the floor and
+        # the CSV blanks his ADP; the magic number never reaches output.
+        _proj("qb4", "QB", 999.0, 90.0),
         _proj("rb1", "RB", 10.0, 30.0),
         _proj("rb2", "RB", None, 20.0),
         _proj("rb3", "RB", None, 10.0),
@@ -154,14 +157,33 @@ def test_cli_writes_the_ranked_priced_pool(world):
         "room_price,price_source,keeper_premium,value"
     )
     cells = [line.split(",") for line in rows]
-    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "qb3", "rb3"]
+    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "qb3", "qb4", "rb3"]
     by_id = {c[1]: c for c in cells}
     assert by_id["qb1"][6] == f"{1 + 200 * 18 / 330:.2f}"  # worth
     assert by_id["rb1"][7] == "10.00"  # room price: the 6-bid band median
     assert by_id["rb1"][8] == "band"
     assert by_id["qb1"][8] == "floor"  # no QB bid history in this world
-    assert [c[0] for c in cells] == [str(n) for n in range(1, 7)]
+    assert [c[0] for c in cells] == [str(n) for n in range(1, 8)]
     assert "qb1" in printed  # the printed table shows the top of the pool
+
+
+def test_no_adp_sentinel_is_blanked_in_the_csv(world):
+    """qb4's feed ADP is the 999.0 sentinel: the CSV blanks it exactly
+    like a missing ADP, the magic number appears nowhere in the output,
+    and the player still prices at the $1 floor."""
+    tmp_path, _, run = world
+    out_csv = tmp_path / "sentinel.csv"
+    code, printed = run("--out", str(out_csv))
+    assert code == 0
+    text = out_csv.read_text(encoding="utf-8")
+    assert "999" not in text
+    assert "999" not in printed
+    by_id = {
+        c[1]: c for c in (line.split(",") for line in text.strip().split("\n")[1:])
+    }
+    assert by_id["qb4"][4] == ""  # ADP blank, exactly like missing points
+    assert by_id["qb4"][7] == "1.00"  # still prices at the floor
+    assert by_id["qb4"][8] == "floor"
 
 
 def test_csv_is_byte_identical_across_runs(world):
