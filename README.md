@@ -5,7 +5,8 @@ read-only Sleeper API client with an on-disk cache, clean parsed types for
 picks and draft state, a snapshot CLI, the static value sheet (room prices,
 projection worth, keeper NPV), and live draft tracking with a replay demo.
 The backtest report and the dashboard are built too, and the override
-file, nomination suggestions, and the dry run are the later slices. The
+file, the allocation plan, nomination suggestions, and the dry run are
+the later slices. The
 decision record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
 
 ## Setup
@@ -75,8 +76,8 @@ nor cache).
 `draftbot/sources.py` and `draftbot/tracker.py` are the live draft-state
 slice. A live poll source and a historical replay source present the same
 one-method interface (`poll() -> SourceTick`), so the tracker cannot tell
-which one feeds it; later slices drive the backtest and the dashboard
-through the same seam. The tracker folds ticks into a board of per-team
+which one feeds it; the backtest and the dashboard drive it through the
+same seam. The tracker folds ticks into a board of per-team
 budgets (seeded from `budget_<slot>` once the commissioner enters keepers,
 the config default until then, labeled as defaulted), spend, open slots,
 positional needs, and max possible bid (remaining budget minus $1 for
