@@ -13,6 +13,7 @@ import pytest
 
 from draftbot.draft_engine import (
     MARGIN_BASE,
+    MARGIN_SLOPE,
     analyze_player,
     build_tiers,
     inflation_adjusted_price,
@@ -58,6 +59,7 @@ class TestPositionalInflation:
     """Remaining money over remaining value, per position, tapered."""
 
     def test_par_room_starts_at_one(self):
+        """Money exactly matching the pool prices every position at par."""
         inflation = positional_inflation(_inflation_rows(), _par_board())
         assert inflation["RB"] == pytest.approx(1.0)
         assert inflation["WR"] == pytest.approx(1.0)
@@ -155,18 +157,11 @@ class TestPositionalInflation:
         )
 
 
-#: The real league's drafted roster shape (IR is extra, not drafted).
-_SLOTS = {
-    "QB": 1,
-    "RB": 2,
-    "WR": 2,
-    "TE": 1,
-    "FLEX": 1,
-    "K": 1,
-    "DEF": 1,
-    "BN": 6,
-    "IR": 2,
-}
+@pytest.fixture(name="slots")
+def slots_fixture(config):
+    """The real league's drafted roster shape, straight from the config
+    (1QB/2RB/2WR/1TE/FLEX/K/DEF plus bench; IR is extra, not drafted)."""
+    return config.roster_slots
 
 
 class TestMarginalNeed:
@@ -189,54 +184,54 @@ class TestMarginalNeed:
             sheet_row(12, "def2", "DEF", 2.0),
         ]
 
-    def test_scarce_starting_slot_is_fully_marginal(self):
+    def test_scarce_starting_slot_is_fully_marginal(self, slots):
         """With no QB owned, a QB's whole worth is lineup-marginal."""
-        assert marginal_lineup_worth("qb15", [], self._rows(), _SLOTS) == 15.0
+        assert marginal_lineup_worth("qb15", [], self._rows(), slots) == 15.0
 
-    def test_third_qb_marginal_value_is_zero(self):
+    def test_third_qb_marginal_value_is_zero(self, slots):
         """Acceptance: two better QBs already fill the only QB slot, and a
         QB cannot ride the FLEX, so a third adds exactly nothing."""
         owned = ["qb12", "qb9"]
-        assert marginal_lineup_worth("qb8", owned, self._rows(), _SLOTS) == 0.0
+        assert marginal_lineup_worth("qb8", owned, self._rows(), slots) == 0.0
 
-    def test_upgrade_is_partially_marginal(self):
+    def test_upgrade_is_partially_marginal(self, slots):
         """Anti-cheat for the quota-count mutant: my QB slot is filled,
         but the candidate beats the incumbent by \\$3 — the marginal value
         is exactly that \\$3, not zero (quota says the slot is full) and
         not \\$15 (a slot-open check says the position is scarce)."""
-        assert marginal_lineup_worth("qb15", ["qb12"], self._rows(), _SLOTS) == 3.0
+        assert marginal_lineup_worth("qb15", ["qb12"], self._rows(), slots) == 3.0
 
-    def test_flex_keeps_a_third_rb_fully_marginal(self):
+    def test_flex_keeps_a_third_rb_fully_marginal(self, slots):
         """Two RBs fill the dedicated slots; the third slides into the
         open FLEX at his full worth."""
         owned = ["rb30", "rb20"]
-        assert marginal_lineup_worth("rb25", owned, self._rows(), _SLOTS) == 25.0
+        assert marginal_lineup_worth("rb25", owned, self._rows(), slots) == 25.0
 
-    def test_flex_competition_prices_the_displacement(self):
+    def test_flex_competition_prices_the_displacement(self, slots):
         """Anti-cheat for FLEX handling: three good WRs already own the
         WR slots plus the FLEX. Adding rb25 upgrades the flex from wr30
         to... nothing: rb25 takes a dedicated RB slot over rb20, and the
         best leftover for FLEX is still wr30 vs the displaced rb20 —
         lineup gains exactly \\$5 (30+25+40+35+30 = 160 over 155)."""
         owned = ["rb30", "rb20", "wr40", "wr35", "wr30"]
-        assert marginal_lineup_worth("rb25", owned, self._rows(), _SLOTS) == 5.0
+        assert marginal_lineup_worth("rb25", owned, self._rows(), slots) == 5.0
 
-    def test_kicker_and_def_slots_count_too(self):
-        assert marginal_lineup_worth("def2", [], self._rows(), _SLOTS) == 2.0
+    def test_kicker_and_def_slots_count_too(self, slots):
+        """K/DEF slots are starting slots like any other."""
+        assert marginal_lineup_worth("def2", [], self._rows(), slots) == 2.0
 
-    def test_off_sheet_players_carry_no_lineup_worth(self):
+    def test_off_sheet_players_carry_no_lineup_worth(self, slots):
         """Both as candidate and as owned filler: a player the sheet does
         not price contributes zero, never a crash."""
-        assert marginal_lineup_worth("ghost", [], self._rows(), _SLOTS) == 0.0
-        assert (
-            marginal_lineup_worth("qb15", ["ghost"], self._rows(), _SLOTS) == 15.0
-        )
+        assert marginal_lineup_worth("ghost", [], self._rows(), slots) == 0.0
+        assert marginal_lineup_worth("qb15", ["ghost"], self._rows(), slots) == 15.0
 
 
 class TestInflationAdjustedPrice:
     """The multiplier's application, floor-safe and tapered."""
 
     def test_top_of_board_inflates_above_the_floor(self):
+        """A full-weight rank scales its above-floor worth by the ratio."""
         row = sheet_row(2, "rb2", "RB", 30.0)
         assert inflation_adjusted_price(row, 1.5) == pytest.approx(1 + 29 * 1.5)
 
@@ -274,13 +269,13 @@ class TestSpendSchedule:
         my own max bid downstream."""
         board = make_board({1: 150, 2: 30}, drafted_slots=6)
         margin, _ = spend_schedule(board, 1, _inflation_rows(), {"RB": 1.0, "WR": 1.0})
-        assert margin == pytest.approx(0.93 + 0.5 * (25 / 5 - 1))
+        assert margin == pytest.approx(MARGIN_BASE + MARGIN_SLOPE * (25 / 5 - 1))
         assert margin > 2.5
 
-    def test_unspendable_surplus_becomes_a_per_slot_boost(self):
-        """Two open slots, \\$50 left, and the whole remaining pool prices
-        at \\$13: \\$39 of my money is literally unspendable on value, so
-        \\$19.50 per open slot gets added to every bid to burn it."""
+    def test_pace_deficit_becomes_a_per_slot_boost(self):
+        """Two open slots, \\$50 left, and my half of the remaining
+        \\$13 pool is \\$6.50: the \\$43.50 my slots cannot absorb at value
+        gets spread over both open slots and added to every bid."""
         rows = [
             sheet_row(1, "a", "RB", 6.0),
             sheet_row(2, "b", "RB", 5.0),
@@ -288,10 +283,12 @@ class TestSpendSchedule:
         ]
         board = make_board({1: 50, 2: 10}, drafted_slots=2)
         _, boost = spend_schedule(board, 1, rows, {"RB": 1.0})
-        assert boost == pytest.approx((50 - 11) / 2)
+        assert boost == pytest.approx((50 - 13 * 2 / 4) / 2)
 
-    def test_sold_players_leave_the_opportunity_pool(self):
-        """The surplus check prices only what is still buyable."""
+    def test_sold_players_leave_the_pace_pool(self):
+        """The pace check prices only what is still buyable: the sold $6
+        lot is out of the pool, and the buyer's filled slot is out of the
+        room's open-slot count."""
         rows = [
             sheet_row(1, "a", "RB", 6.0),
             sheet_row(2, "b", "RB", 5.0),
@@ -299,10 +296,11 @@ class TestSpendSchedule:
         ]
         board = make_board({1: 50, 2: 10}, [Sale("a", 6, 2)], drafted_slots=2)
         _, boost = spend_schedule(board, 1, rows, {"RB": 1.0})
-        # Top-2 remaining: b ($5) and c ($2); surplus (50-7)/2.
-        assert boost == pytest.approx((50 - 7) / 2)
+        # Remaining pool $7 over 3 open slots; my share is two of them.
+        assert boost == pytest.approx((50 - 7 * 2 / 3) / 2)
 
     def test_full_roster_has_no_schedule(self):
+        """Nothing left to buy means nothing to schedule."""
         board = make_board({1: 5, 2: 30}, drafted_slots=0)
         assert spend_schedule(board, 1, _inflation_rows(), {}) == (0.0, 0.0)
 
@@ -333,12 +331,14 @@ def _league_rows():
     ]
 
 
-def _league_board(sales=(), budgets=None, off_model=()):
-    """Twelve $200 teams drafting fifteen slots each, tracker-consistent."""
+def _league_board(sales=(), off_model=()):
+    """Three teams, eight drafted slots, $111 budgets: the room's money
+    matches the sheet's $335 pool (no pace deficit on an empty board), so
+    the spend layers start from their neutral stance."""
     return make_board(
-        budgets or {slot: 200 for slot in range(1, 13)},
+        {1: 111, 3: 111, 7: 111},
         sales,
-        drafted_slots=15,
+        drafted_slots=8,
         off_model=off_model,
     )
 
@@ -373,7 +373,9 @@ class TestAnalyzePlayer:
         assert analysis.spend_adjusted == pytest.approx(
             1.0 + (analysis.need_adjusted - 1.0) * margin + boost
         )
-        assert analysis.tier == tier_status("rb40", build_tiers(rows), frozenset({"wr40"}))
+        assert analysis.tier == tier_status(
+            "rb40", build_tiers(rows), frozenset({"wr40"})
+        )
         assert analysis.my_cap == board.team(7).max_bid
         assert analysis.max_bid == int(analysis.spend_adjusted)
 
@@ -389,7 +391,8 @@ class TestAnalyzePlayer:
 
         assert third.marginal_worth == 0.0
         assert third.need_bump < 0.0
-        assert third.max_bid < starter.max_bid / 2
+        assert third.need_adjusted < starter.need_adjusted / 2
+        assert third.max_bid < starter.max_bid
 
     def test_scarce_starting_slot_beats_the_redundant_case(self, config):
         """The need bump in one comparison: the same QB is priced with my
@@ -450,6 +453,7 @@ class TestAnalyzePlayer:
         assert resolved == explicit
 
     def test_unresolvable_slot_raises_instead_of_guessing(self, config):
+        """A board without my roster id is an error, never team number 1."""
         board = make_board({1: 200}, drafted_slots=15)
         with pytest.raises(ValueError, match="roster"):
             analyze_player("rb40", _league_rows(), board, config)
@@ -471,16 +475,16 @@ class TestAnalyzePlayer:
         assert [repr(item) for item in first] == [repr(item) for item in second]
 
 
-class TestTaperWeight:
-    """The taper's shape is part of the contract the tests above rely on."""
-
-    def test_full_fade_and_endpoints(self):
-        assert taper_weight(1) == 1.0
-        assert taper_weight(110) == 1.0
-        assert taper_weight(130) == pytest.approx(0.5)
-        assert taper_weight(150) == 0.0
-        assert taper_weight(400) == 0.0
-        assert taper_weight(None) == 0.0
+def test_taper_weight_full_fade_and_endpoints():
+    """The taper's shape is part of the contract the tests above rely on:
+    full weight through rank 110, linear fade, zero from rank 150 on, and
+    zero for the unranked."""
+    assert taper_weight(1) == 1.0
+    assert taper_weight(110) == 1.0
+    assert taper_weight(130) == pytest.approx(0.5)
+    assert taper_weight(150) == 0.0
+    assert taper_weight(400) == 0.0
+    assert taper_weight(None) == 0.0
 
 
 class TestTiers:

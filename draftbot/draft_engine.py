@@ -30,7 +30,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from draftbot.config import LeagueConfig
-from draftbot.tracker import FLEX_ELIGIBLE, BoardState
+from draftbot.tracker import FLEX_ELIGIBLE, BoardState, TeamState
 from draftbot.valuation import FLOOR_PRICE, SheetRow
 
 #: Inflation applies in full down to this sheet rank...
@@ -59,7 +59,9 @@ MARGIN_BASE = 0.93
 #: ...and rise this much for every unit my money-per-open-slot climbs
 #: past the room's (spend down late). No upper clamp: late-draft riches
 #: must be spendable, and the team max bid already caps every number.
-MARGIN_SLOPE = 0.5
+#: Calibrated against the simulated-draft spend-down test: shallower
+#: slopes strand $10-16 of a $200 budget there.
+MARGIN_SLOPE = 1.1
 
 #: The margin never drops below this: a broke stack still bids near value
 #: on the players it actually needs.
@@ -126,22 +128,12 @@ def positional_inflation(
     simply absent from the sheet — touch neither side of any ratio, and
     kept players were never part of the buyable pool at all.
     """
-    keepers = _keeper_ids(keepers_by_slot)
     pool = sorted(
-        (row for row in rows if row.player_id not in keepers),
+        (row for row in rows if row.player_id not in _keeper_ids(keepers_by_slot)),
         key=lambda row: row.player_id,
     )
     sold = {sale.player_id for sale in board.sales}
-    off_model = set(board.off_model_player_ids)
-    rows_by_id = {row.player_id: row for row in pool}
-
-    initial: dict[str, float] = {}
-    remaining: dict[str, float] = {}
-    for row in pool:
-        disc = _discretionary(row)
-        initial[row.position] = initial.get(row.position, 0.0) + disc
-        if row.player_id not in sold:
-            remaining[row.position] = remaining.get(row.position, 0.0) + disc
+    initial, remaining = _pool_values(pool, sold)
     total_initial = sum(initial[position] for position in sorted(initial))
 
     # Initial discretionary money: each team's actual budget minus the $1
@@ -151,15 +143,7 @@ def positional_inflation(
     money = sum(
         team.budget - (team.open_slots + team.purchase_count) for team in board.teams
     )
-
-    spent: dict[str, float] = {}
-    for sale in board.sales:
-        row = rows_by_id.get(sale.player_id)
-        if row is None or sale.player_id in off_model:
-            continue
-        spent[row.position] = spent.get(row.position, 0.0) + max(
-            0.0, (sale.amount or 0) - FLOOR_PRICE
-        )
+    spent = _on_model_spend(board, pool)
 
     inflation: dict[str, float] = {}
     for position in sorted(initial):
@@ -171,6 +155,38 @@ def positional_inflation(
         ratio = (budgeted - spent.get(position, 0.0)) / left
         inflation[position] = _quantize(max(INFLATION_MIN, min(INFLATION_MAX, ratio)))
     return inflation
+
+
+def _pool_values(
+    pool: Sequence[SheetRow], sold: AbstractSet[str]
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-position taper-weighted discretionary value of the whole
+    initial pool and of its still-unsold remainder."""
+    initial: dict[str, float] = {}
+    remaining: dict[str, float] = {}
+    for row in pool:
+        disc = _discretionary(row)
+        initial[row.position] = initial.get(row.position, 0.0) + disc
+        if row.player_id not in sold:
+            remaining[row.position] = remaining.get(row.position, 0.0) + disc
+    return initial, remaining
+
+
+def _on_model_spend(board: BoardState, pool: Sequence[SheetRow]) -> dict[str, float]:
+    """Above-floor dollars spent per position on ON-model sales only: a
+    sale flagged off-model by the board, or simply absent from the pool,
+    never debits any position's money."""
+    rows_by_id = {row.player_id: row for row in pool}
+    off_model = set(board.off_model_player_ids)
+    spent: dict[str, float] = {}
+    for sale in board.sales:
+        row = rows_by_id.get(sale.player_id)
+        if row is None or sale.player_id in off_model:
+            continue
+        spent[row.position] = spent.get(row.position, 0.0) + max(
+            0.0, (sale.amount or 0) - FLOOR_PRICE
+        )
+    return spent
 
 
 def inflation_adjusted_price(row: SheetRow, inflation: float) -> float:
@@ -196,11 +212,12 @@ def spend_schedule(
 
     The margin multiplies every bid: ``MARGIN_BASE`` at money parity,
     rising by ``MARGIN_SLOPE`` per unit of my money-per-open-slot over
-    the rest of the room's, floored at ``MARGIN_MIN``. The boost is the
-    money the remaining pool can no longer absorb — my remaining dollars
-    minus the top ``open_slots`` remaining inflation-adjusted prices —
-    spread over my open slots and added to every bid, so a surplus gets
-    burned instead of stranded. A full roster returns (0, 0).
+    the rest of the room's, floored at ``MARGIN_MIN``. The boost is my
+    pace deficit: remaining dollars beyond my open-slot share of the
+    remaining pool's inflation-adjusted value, spread over my open slots
+    and added to every bid — zero while I am on pace, growing as value
+    leaves the board without my money following, so a surplus burns into
+    real lots instead of stranding. A full roster returns (0, 0).
     """
     me = board.team(my_slot)
     if me.open_slots <= 0:
@@ -212,21 +229,30 @@ def spend_schedule(
     if others_open > 0:
         pool_rate = max(1.0, sum(team.remaining for team in others) / others_open)
     margin = max(MARGIN_MIN, MARGIN_BASE + MARGIN_SLOPE * (my_rate / pool_rate - 1.0))
+    boost = _pace_boost(board, me, rows, inflation, keepers_by_slot)
+    return (_quantize(margin), _quantize(boost))
 
+
+def _pace_boost(
+    board: BoardState,
+    me: TeamState,
+    rows: Sequence[SheetRow],
+    inflation: Mapping[str, float],
+    keepers_by_slot: Mapping[int, Sequence[str]] | None,
+) -> float:
+    """My pace deficit per open slot: remaining dollars beyond my
+    open-slot share of the remaining pool's inflation-adjusted value."""
     unavailable = {sale.player_id for sale in board.sales} | _keeper_ids(
         keepers_by_slot
     )
-    prices = sorted(
-        (
-            -inflation_adjusted_price(row, inflation.get(row.position, 1.0)),
-            row.player_id,
-        )
-        for row in rows
+    pool_value = sum(
+        inflation_adjusted_price(row, inflation.get(row.position, 1.0))
+        for row in sorted(rows, key=lambda row: row.player_id)
         if row.player_id not in unavailable
     )
-    opportunity = sum(-price for price, _ in prices[: me.open_slots])
-    boost = max(0.0, (me.remaining - opportunity) / me.open_slots)
-    return (_quantize(margin), _quantize(boost))
+    room_open = sum(team.open_slots for team in board.teams)
+    fair_share = pool_value * me.open_slots / room_open if room_open else 0.0
+    return max(0.0, (me.remaining - fair_share) / me.open_slots)
 
 
 def best_lineup_worth(
@@ -417,7 +443,9 @@ def _off_sheet_row(player_id: str) -> SheetRow:
     )
 
 
-def analyze_player(
+def analyze_player(  # pylint: disable=too-many-arguments  # the public
+    # pure-function seam: the four inputs of the contract plus two
+    # keyword-only extras the board cannot carry (keeper ids, replay slot).
     player_id: str,
     rows: Sequence[SheetRow],
     board: BoardState,
