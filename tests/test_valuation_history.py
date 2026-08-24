@@ -158,7 +158,17 @@ class TestVerifiedSpotChecks:
     def test_top_rb_prices_off_the_leagues_actual_top_bids(self, history):
         """The top-RB band holds the room's real top prices ($55 and $57
         McCaffrey/Henry 2025); the band median prices a top RB in that
-        cluster's range, off the bids rather than the curve."""
+        cluster's range, off the bids rather than the curve.
+
+        Why the median is $50 and not the "$55-57" from the original spot
+        check: that figure described the room's actual top BIDS, never a
+        band median. On the committed 2023-25 bids, no RB band with 6+
+        samples can have a median above $50 under the 1.6-ratio band
+        definition (proven exhaustively in review: a median >= $55 with
+        n >= 6 needs four bids >= $55, and the only such bids sit at ADP
+        1.5-7.9, a 5.3x spread — a 1.6-ratio band spans at most 2.56x).
+        So $50 is the honest reachable median, and the $55/$57 bids are
+        pinned here as band MEMBERS instead."""
         band = history.prices.band_amounts("RB", 7.5)
         assert len(band) >= 6
         assert {55, 57} <= set(band)
