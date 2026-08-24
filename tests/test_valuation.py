@@ -21,28 +21,12 @@ from draftbot.valuation import (
     parse_projections,
     replacement_ranks,
 )
+from tests.helpers_valuation import projection_row
 
 
 def _bids(position, pairs):
     """Bids for one position from (adp, amount) pairs."""
     return [Bid(position=position, adp=adp, amount=amount) for adp, amount in pairs]
-
-
-def _projection_row(player_id, position, adp, pts=100.0, years_exp=3, name="A Player"):
-    # pylint: disable=too-many-arguments,too-many-positional-arguments  # fixture
-    # builder mirroring the live API row's independent fields one-to-one.
-    """One raw projections-endpoint row, shaped like the live API."""
-    first, _, last = name.partition(" ")
-    return {
-        "player_id": player_id,
-        "stats": {"adp_half_ppr": adp, "pts_half_ppr": pts},
-        "player": {
-            "position": position,
-            "years_exp": years_exp,
-            "first_name": first,
-            "last_name": last,
-        },
-    }
 
 
 def _raw_pick(player_id, position, amount, slot=1, is_keeper=None):
@@ -60,7 +44,7 @@ class TestParseProjections:
 
     def test_pulls_adp_points_position_and_experience(self):
         """The four fields the model consumes come from stats/player dicts."""
-        rows = [_projection_row("101", "RB", 7.5, pts=210.4, years_exp=2)]
+        rows = [projection_row("101", "RB", 7.5, pts=210.4, years_exp=2)]
         season = parse_projections(rows)
         row = season["101"]
         assert row.adp == 7.5
@@ -78,7 +62,7 @@ class TestParseProjections:
 
     def test_name_joins_first_and_last(self):
         """Display names come straight from the embedded player object."""
-        rows = [_projection_row("101", "RB", 7.5, name="Jahmyr Gibbs")]
+        rows = [projection_row("101", "RB", 7.5, name="Jahmyr Gibbs")]
         assert parse_projections(rows)["101"].name == "Jahmyr Gibbs"
 
 
@@ -89,8 +73,8 @@ class TestBuildBids:
         """Player 101's ADP was 20 in 2023 and 5 in 2024; the 2023 bid must
         carry 20 — an implementation reading one merged ADP map fails."""
         seasons = {
-            2023: parse_projections([_projection_row("101", "RB", 20.0)]),
-            2024: parse_projections([_projection_row("101", "RB", 5.0)]),
+            2023: parse_projections([projection_row("101", "RB", 20.0)]),
+            2024: parse_projections([projection_row("101", "RB", 5.0)]),
         }
         picks = {2023: parse_picks([_raw_pick("101", "RB", 31)])}
         bids = build_bids(picks, seasons)
@@ -101,9 +85,9 @@ class TestBuildBids:
         seasons = {
             2023: parse_projections(
                 [
-                    _projection_row("k1", "K", 90.0),
-                    _projection_row("d1", "DEF", 95.0),
-                    _projection_row("101", "WR", 10.0),
+                    projection_row("k1", "K", 90.0),
+                    projection_row("d1", "DEF", 95.0),
+                    projection_row("101", "WR", 10.0),
                 ]
             )
         }
@@ -121,8 +105,8 @@ class TestBuildBids:
         seasons = {
             2023: parse_projections(
                 [
-                    _projection_row("101", "RB", None),
-                    _projection_row("102", "RB", 999.0),
+                    projection_row("101", "RB", None),
+                    projection_row("102", "RB", 999.0),
                 ]
             )
         }
@@ -136,7 +120,7 @@ class TestBuildBids:
     def test_position_comes_from_the_pick_metadata(self):
         """Attribution uses the pick's own position tag (what the room drafted
         him as), matching the reference model."""
-        seasons = {2023: parse_projections([_projection_row("101", "WR", 10.0)])}
+        seasons = {2023: parse_projections([projection_row("101", "WR", 10.0)])}
         picks = {2023: parse_picks([_raw_pick("101", "TE", 9)])}
         assert build_bids(picks, seasons) == [Bid(position="TE", adp=10.0, amount=9)]
 
@@ -153,7 +137,7 @@ class TestKeeperRowExclusion:
 
     def test_flagged_keeper_picks_never_become_bids(self):
         """A pick with is_keeper=true is excluded even with a valid ADP."""
-        seasons = {2023: parse_projections([_projection_row("101", "RB", 10.0)])}
+        seasons = {2023: parse_projections([projection_row("101", "RB", 10.0)])}
         picks = {2023: parse_picks([_raw_pick("101", "RB", 10, is_keeper=True)])}
         assert not build_bids(picks, seasons)
 
@@ -191,8 +175,8 @@ class TestKeeperRowExclusion:
         """End to end: the detected 2024 keeper row vanishes from the fit
         while the genuine 2023 sale of the same player survives."""
         seasons = {
-            2023: parse_projections([_projection_row("k1", "WR", 30.0)]),
-            2024: parse_projections([_projection_row("k1", "WR", 25.0)]),
+            2023: parse_projections([projection_row("k1", "WR", 30.0)]),
+            2024: parse_projections([projection_row("k1", "WR", 25.0)]),
         }
         picks = {
             2023: parse_picks([_raw_pick("k1", "WR", 1, slot=1)]),
@@ -313,7 +297,7 @@ class TestWorth:
     @staticmethod
     def _tiny_season(points_by_id, position="QB"):
         rows = [
-            _projection_row(pid, position, None, pts=pts)
+            projection_row(pid, position, None, pts=pts)
             for pid, pts in points_by_id.items()
         ]
         return parse_projections(rows)
@@ -345,10 +329,10 @@ class TestWorth:
     def test_kickers_and_defenses_are_roster_fillers_at_one_dollar(self):
         """Monster kicker points never earn auction dollars."""
         rows = [
-            _projection_row("k1", "K", None, pts=999.0),
-            _projection_row("d1", "DEF", None, pts=999.0),
-            _projection_row("q1", "QB", None, pts=100.0),
-            _projection_row("q2", "QB", None, pts=50.0),
+            projection_row("k1", "K", None, pts=999.0),
+            projection_row("d1", "DEF", None, pts=999.0),
+            projection_row("q1", "QB", None, pts=100.0),
+            projection_row("q2", "QB", None, pts=50.0),
         ]
         worths = compute_worths(
             parse_projections(rows), roster_slots={"QB": 1}, teams=1, budget=10

@@ -12,7 +12,7 @@ import pytest
 
 from draftbot.valuesheet import main
 from tests.conftest import FakeTransport
-from tests.test_valuation import _projection_row
+from tests.helpers_valuation import projection_row
 
 CONFIG_TOML = """\
 [league]
@@ -50,7 +50,7 @@ roster_id = 1
 
 def _proj(player_id, position, adp, pts, years_exp=1):
     """One canned projections row (named "P <id>" so tables show the id)."""
-    return _projection_row(
+    return projection_row(
         player_id, position, adp, pts=pts, years_exp=years_exp, name=f"P {player_id}"
     )
 
