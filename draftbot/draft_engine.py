@@ -24,10 +24,25 @@ the dashboard (issue #7) only renders the returned analysis record.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
+from draftbot.tracker import BoardState
 from draftbot.valuation import FLOOR_PRICE, SheetRow
+
+#: Inflation applies in full down to this sheet rank...
+TAPER_FULL_RANK = 110
+
+#: ...and not at all from this rank on, fading linearly between (measured
+#: keeper-league inflation concentrates above roughly the 130th player;
+#: the $1-5 tail trades at floor prices whatever the room's money does).
+TAPER_ZERO_RANK = 150
+
+#: Sanity clamp on the per-position ratio: a depleted denominator late in
+#: the draft must not emit an absurd multiplier.
+INFLATION_MIN = 0.25
+INFLATION_MAX = 3.0
 
 #: A tier break needs a value gap of at least this many dollars...
 TIER_ABS_GAP = 2.0
@@ -43,6 +58,98 @@ _QUANTIZE_DECIMALS = 10
 
 def _quantize(value: float) -> float:
     return round(value, _QUANTIZE_DECIMALS)
+
+
+def taper_weight(rank: int | None) -> float:
+    """How much of the inflation multiplier reaches this sheet rank:
+    1.0 through ``TAPER_FULL_RANK``, 0.0 from ``TAPER_ZERO_RANK`` on,
+    linear between. An unranked (off-sheet) player never inflates."""
+    if rank is None:
+        return 0.0
+    if rank <= TAPER_FULL_RANK:
+        return 1.0
+    if rank >= TAPER_ZERO_RANK:
+        return 0.0
+    return _quantize((TAPER_ZERO_RANK - rank) / (TAPER_ZERO_RANK - TAPER_FULL_RANK))
+
+
+def _keeper_ids(keepers_by_slot: Mapping[int, Sequence[str]] | None) -> frozenset[str]:
+    return frozenset(
+        player_id
+        for slot in sorted(keepers_by_slot or {})
+        for player_id in (keepers_by_slot or {})[slot]
+    )
+
+
+def _discretionary(row: SheetRow) -> float:
+    """The taper-weighted dollars above the $1 floor that room money can
+    actually move. Worth basis: the sheet's worths are what the room's
+    dollars were normalized against; the keeper premium is next season's
+    money and stays out of the ratio."""
+    return _quantize(taper_weight(row.rank) * max(0.0, row.worth - FLOOR_PRICE))
+
+
+def positional_inflation(
+    rows: Sequence[SheetRow],
+    board: BoardState,
+    keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
+) -> dict[str, float]:
+    """Remaining room money over remaining sheet value, per position.
+
+    Each position is budgeted its share of the room's initial
+    discretionary money (actual keeper-reduced budgets, never the sheet's
+    normalization room) in proportion to its share of the initial
+    taper-weighted pool; every on-model sale then debits that position's
+    money by the dollars paid above the floor while its pool loses the
+    player's sheet value. Off-model sales — flagged by the board or
+    simply absent from the sheet — touch neither side of any ratio, and
+    kept players were never part of the buyable pool at all.
+    """
+    keepers = _keeper_ids(keepers_by_slot)
+    pool = sorted(
+        (row for row in rows if row.player_id not in keepers),
+        key=lambda row: row.player_id,
+    )
+    sold = {sale.player_id for sale in board.sales}
+    off_model = set(board.off_model_player_ids)
+    rows_by_id = {row.player_id: row for row in pool}
+
+    initial: dict[str, float] = {}
+    remaining: dict[str, float] = {}
+    for row in pool:
+        disc = _discretionary(row)
+        initial[row.position] = initial.get(row.position, 0.0) + disc
+        if row.player_id not in sold:
+            remaining[row.position] = remaining.get(row.position, 0.0) + disc
+    total_initial = sum(initial[position] for position in sorted(initial))
+
+    # Initial discretionary money: each team's actual budget minus the $1
+    # its starting open slots pin. open_slots + purchase_count restores
+    # the pre-sale slot count, so the figure is constant through the draft
+    # and never moves when a sale (off-model included) debits a budget.
+    money = sum(
+        team.budget - (team.open_slots + team.purchase_count) for team in board.teams
+    )
+
+    spent: dict[str, float] = {}
+    for sale in board.sales:
+        row = rows_by_id.get(sale.player_id)
+        if row is None or sale.player_id in off_model:
+            continue
+        spent[row.position] = spent.get(row.position, 0.0) + max(
+            0.0, (sale.amount or 0) - FLOOR_PRICE
+        )
+
+    inflation: dict[str, float] = {}
+    for position in sorted(initial):
+        left = remaining.get(position, 0.0)
+        if left <= 0 or total_initial <= 0:
+            inflation[position] = 1.0
+            continue
+        budgeted = money * initial[position] / total_initial
+        ratio = (budgeted - spent.get(position, 0.0)) / left
+        inflation[position] = _quantize(max(INFLATION_MIN, min(INFLATION_MAX, ratio)))
+    return inflation
 
 
 @dataclass(frozen=True)
