@@ -747,3 +747,13 @@ def build_value_sheet(
         )
         for rank, (value, row, room, source, premium) in enumerate(unranked, start=1)
     ]
+
+
+def value_map(rows: Sequence[SheetRow]) -> Mapping[str, float]:
+    """Player id -> NPV-adjusted value, straight off the sheet rows.
+
+    The seam the live draft tracker consumes (issue #4 injects exactly
+    this mapping); built here so consumers never hand-roll it or re-read
+    the CSV.
+    """
+    return {row.player_id: row.value for row in rows}
