@@ -290,12 +290,14 @@ class DraftTracker:
         )
 
     def _settings_warnings(self, draft: DraftState) -> tuple[SettingsMismatch, ...]:
-        """Assumption diffs, the pre-entry keeper condition, and the two
-        things a hand-keyed ``--budget`` override can do that the operator
-        must not have to discover from a wrong number."""
+        """Assumption diffs, the pre-entry keeper condition, the real
+        budget a hand-keyed ``--budget`` override discards, and money no
+        keeper roster could have left over — none of which the operator
+        should have to discover from a wrong number."""
         warnings = list(diff_settings(draft, self._expected_settings))
         warnings.extend(self._keeper_budget_warnings(draft))
         warnings.extend(self._override_warnings(draft))
+        warnings.extend(self._ceiling_warnings(draft))
         return tuple(warnings)
 
     def uncovered_keeper_slots(self, draft: DraftState) -> tuple[int, ...]:
@@ -348,55 +350,91 @@ class DraftTracker:
         ]
 
     def _override_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
-        """Two standing banners about ``--budget``, both named by slot.
+        """The REPLACED banner: an override outranks a ``budget_<slot>``
+        key, so it can discard real server data.
 
-        REPLACED: an override outranks a ``budget_<slot>`` key, so it can
-        discard real server data. Filling a hole is the ordinary case and
-        stays quiet; replacing a figure Sleeper actually supplied is not,
-        and the operator has to be able to tell the two apart — otherwise
-        the flip trades one invisible failure for another.
-
-        IMPOSSIBLE: an override above what a keeper roster can possibly
-        hold is provably wrong, not merely unverified. Keeper cost is
-        bounded below by the config's floor, so a slot holding N keepers
-        cannot carry more than ``budget - floor * N`` of post-keeper
-        money. The CLI cannot make this check — it parses before the
-        network on purpose, and keeper lists arrive with the rosters — so
-        it lands here, where both facts are in hand.
+        Filling a hole is the ordinary case and stays quiet; replacing a
+        figure Sleeper actually supplied is not, and the operator has to
+        be able to tell the two apart — otherwise the flip trades one
+        invisible failure for another.
         """
-        floor = self._config.keeper_cost_floor
-        kept, discarded, impossible = [], [], []
+        kept, discarded = [], []
         for slot in sorted(self._budget_overrides):
             amount = self._budget_overrides[slot]
             live = draft.budget_by_slot.get(slot)
             if live is not None and live != amount:
                 kept.append(f"slot {slot} = ${amount}")
                 discarded.append(f"slot {slot} = ${live}")
-            keepers = self._keepers_by_slot.get(slot, ())
+        if not kept:
+            return []
+        return [
+            SettingsMismatch(
+                field="budget_override",
+                expected=f"{', '.join(kept)} (hand-keyed with --budget, shown)",
+                actual=f"{', '.join(discarded)} (Sleeper's own key, discarded)",
+            )
+        ]
+
+    def _ceiling_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+        """The IMPOSSIBLE banner: a keeper team's budget above what its
+        roster can possibly leave is provably wrong, not merely
+        unverified.
+
+        Keeper cost is bounded below by the config's floor, so a slot
+        holding N keepers cannot carry more than ``budget - floor * N`` of
+        post-keeper money. This reads the RESOLVED budget, not only the
+        hand-keyed ones: the failure this whole rule exists for is a
+        commissioner typing one flat league budget into all twelve boxes,
+        which leaves every key present, clears the keeper_budgets banner,
+        and renders impossible money with nothing marked. The same figure
+        typed with ``--budget`` already raised a banner, and the same
+        money must not give opposite signals depending on who typed it —
+        so the message names the source instead.
+
+        The carve-out: a slot the keeper_budgets banner ALREADY names
+        (keeper team, no real money from either source, showing the
+        league default) is skipped. Its default can breach the same
+        ceiling, but that is one hole, and reporting it twice is how a
+        banner becomes wallpaper.
+
+        The CLI cannot make this check — it parses before the network on
+        purpose, and keeper lists arrive with the rosters — so it lands
+        here, where both facts are in hand.
+        """
+        floor = self._config.keeper_cost_floor
+        uncovered = set(self.uncovered_keeper_slots(draft))
+        impossible = []
+        for slot in sorted(self._keepers_by_slot):
+            keepers = self._keepers_by_slot[slot]
+            if not keepers or slot in uncovered:
+                continue
+            if slot in self._budget_overrides:
+                amount = self._budget_overrides[slot]
+                source = "hand-keyed with --budget"
+            else:
+                amount = draft.budget_by_slot.get(slot)
+                source = "Sleeper's own key"
+            if amount is None:
+                # Unreachable while `uncovered` means what it says; kept
+                # so a later edit there degrades to silence, not a crash
+                # in the poll thread.
+                continue
             ceiling = self._config.auction_budget - floor * len(keepers)
-            if keepers and amount > ceiling:
+            if amount > ceiling:
                 impossible.append(
-                    f"slot {slot} = ${amount} against a ceiling of ${ceiling} "
-                    f"({len(keepers)} keeper(s) at the ${floor} floor)"
+                    f"slot {slot} = ${amount} ({source}) against a ceiling "
+                    f"of ${ceiling} ({len(keepers)} keeper(s) at the "
+                    f"${floor} floor)"
                 )
-        warnings = []
-        if kept:
-            warnings.append(
-                SettingsMismatch(
-                    field="budget_override",
-                    expected=f"{', '.join(kept)} (hand-keyed with --budget, shown)",
-                    actual=f"{', '.join(discarded)} (Sleeper's own key, discarded)",
-                )
+        if not impossible:
+            return []
+        return [
+            SettingsMismatch(
+                field="budget_ceiling",
+                expected="a keeper team's budget cannot exceed its ceiling",
+                actual="; ".join(impossible),
             )
-        if impossible:
-            warnings.append(
-                SettingsMismatch(
-                    field="budget_override_ceiling",
-                    expected="a keeper team's budget cannot exceed its ceiling",
-                    actual="; ".join(impossible),
-                )
-            )
-        return warnings
+        ]
 
     def _resolve_nomination(
         self, draft: DraftState, sold: set[str], picks_trusted: bool

@@ -207,7 +207,7 @@ def test_an_override_that_discards_a_real_budget_says_so(config):
     assert not [w for w in agrees.settings_warnings if w.field == "budget_override"]
 
 
-def test_an_override_a_keeper_roster_cannot_afford_raises_a_banner(config):
+def test_a_budget_a_keeper_roster_cannot_afford_raises_a_banner(config):
     """`--budget 5=200` on a slot holding three keepers is not merely
     unverified, it is provably impossible: keeper cost is bounded below
     by the $5 floor, so three keepers leave at most $185 of post-keeper
@@ -222,23 +222,65 @@ def test_an_override_a_keeper_roster_cannot_afford_raises_a_banner(config):
     over = DraftTracker(
         config, keepers_by_slot=keepers, budget_overrides={5: 200}
     ).update(_tick())
-    (warning,) = [
-        w for w in over.settings_warnings if w.field == "budget_override_ceiling"
-    ]
+    (warning,) = [w for w in over.settings_warnings if w.field == "budget_ceiling"]
     assert "slot 5 = $200" in str(warning.actual)
     assert "$185" in str(warning.actual)
+    assert "hand-keyed with --budget" in str(warning.actual)
 
     exact = DraftTracker(
         config, keepers_by_slot=keepers, budget_overrides={5: 185}
     ).update(_tick())
-    assert not [
-        w for w in exact.settings_warnings if w.field == "budget_override_ceiling"
-    ]
+    assert not [w for w in exact.settings_warnings if w.field == "budget_ceiling"]
 
     keeper_free = DraftTracker(config, budget_overrides={5: 200}).update(_tick())
-    assert not [
-        w for w in keeper_free.settings_warnings if w.field == "budget_override_ceiling"
-    ]
+    assert not [w for w in keeper_free.settings_warnings if w.field == "budget_ceiling"]
+
+
+def test_the_ceiling_reads_sleepers_own_key_too_but_not_the_default(config):
+    """The silent variant the whole fail-closed budget rule exists for.
+
+    A commissioner who types a flat $200 into all twelve boxes leaves
+    every ``budget_<slot>`` key present, so ``budget_is_default`` reads
+    False, the keeper_budgets banner clears, and wrong money renders with
+    no mark at all. The same impossible figure typed as `--budget 5=200`
+    raises a banner. Same money, same board, opposite signal — so the
+    ceiling test runs on the RESOLVED per-slot budget and names where the
+    figure came from.
+
+    ANTI-CHEAT on the carve-out, both directions on ONE board. Slot 5
+    holds three keepers and carries a real $200 key: provably impossible,
+    banner. Slot 6 holds three keepers and carries NO key from either
+    source, so its resolved budget is the same $200 — and it must stay
+    out of this banner, because the keeper_budgets banner already names
+    it and double-reporting one hole as two faults is how a banner
+    becomes wallpaper. An implementation that simply prices every keeper
+    slot's resolved budget reports slot 6 as well and fails here."""
+    keepers = {5: ("K1", "K2", "K3"), 6: ("K4", "K5", "K6")}
+    board = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 200})
+    )
+
+    (warning,) = [w for w in board.settings_warnings if w.field == "budget_ceiling"]
+    assert "slot 5 = $200" in str(warning.actual)
+    assert "$185" in str(warning.actual)
+    assert "Sleeper's own key" in str(warning.actual)
+    assert "slot 6" not in str(warning.actual)
+    # Slot 6 is the uncovered one, and the standing banner that already
+    # owns it says so by slot.
+    (uncovered,) = [w for w in board.settings_warnings if w.field == "keeper_budgets"]
+    assert "slots 6" in str(uncovered.actual)
+
+    # Quiet case: nobody entered anything. Every keeper slot resolves to
+    # the $200 default, and the ceiling banner must stay silent on all of
+    # them — one hole, one banner.
+    nothing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    assert not [w for w in nothing.settings_warnings if w.field == "budget_ceiling"]
+
+    # Quiet case: real keys a keeper roster can actually afford.
+    real = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 185, "budget_6": 106})
+    )
+    assert not [w for w in real.settings_warnings if w.field == "budget_ceiling"]
 
 
 def test_nominee_in_the_sold_set_never_renders_live(config):

@@ -260,8 +260,16 @@ enters the flat league budget for twelve keeper teams: every key is
 present, nothing is flagged, and every number is still fiction. Under the
 other ordering there is no lever at all. Replacing a figure Sleeper
 actually supplied is never silent, though: a standing banner names the
-slot and both amounts, as does an override a keeper roster provably
-cannot afford.
+slot and both amounts.
+
+Money a keeper roster provably cannot have left over gets its own banner,
+whoever entered it. Keeper cost has a floor, so a slot holding three
+keepers cannot carry more than $185 of post-keeper money, and a $200
+there is wrong rather than merely unentered — including in the flat
+league-budget room above, where nothing else fires. The banner names the
+source, and it leaves alone any slot the missing-budget banner already
+names: that is one hole, and reporting it twice is how a banner becomes
+wallpaper.
 
 The verdict suppression is per-slot on purpose. Keying my own slot
 restores my verdict even while the rest of the room is uncovered, because
