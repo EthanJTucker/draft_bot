@@ -65,11 +65,12 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     The stale-bridge rule is FIRST, ahead of the five that predate it and
     without reordering any of them. Every other rule describes this lot or
     this feed, clears itself as the draft moves on, and leaves the rest of
-    the page true; that one says the roster, the needs, the open slots and
-    the max bid all belong to another team, so the inputs the later rules
-    read are themselves mis-attributed. It is also the only reason here
-    that never clears without the operator restarting, so it is the only
-    one worth spending the reason line on.
+    the page true; that one says the keeper lists behind the rosters, the
+    needs, the open slots and the max bid are still on the seats the old
+    draft order gave them, so the inputs the later rules read are
+    themselves mis-attributed. It is also the only reason here that never
+    clears without the operator restarting, so it is the only one worth
+    spending the reason line on.
 
     The budget rule is deliberately narrow, and the narrowness is the
     point. It reads MY slot only, and it clears as soon as that slot
@@ -88,11 +89,18 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     on top of the standing settings banner and the per-team flag.
     """
     if keeper_map_stale:
+        # Deliberately says the lists are on the OLD SEATS and not that
+        # they are somebody else's: a permutation that happens to fix my
+        # own slot leaves the MY TEAM panel and the max bid exactly right
+        # (2024 fixed slots 1 and 3, 2025 fixed slot 6), and what is
+        # wrong there is the other teams' rows. Same wording the banner
+        # gets right one line above, which also names the moved slots.
         return None, (
-            "the draft order changed after this dashboard started, so its "
-            "keeper lists, my roster panel, my open slots and my max bid "
-            "all belong to whichever team held my seat before; RESTART the "
-            "dashboard to rebuild them — not advising until you do"
+            "the draft order changed after this dashboard started, so every "
+            "keeper list, roster panel, need count and open-slot count here "
+            "still sits on the seat the old order gave it; the banner above "
+            "names the slots that moved — RESTART the dashboard to rebuild "
+            "them, not advising until you do"
         )
     if paused:
         return None, "draft paused"
