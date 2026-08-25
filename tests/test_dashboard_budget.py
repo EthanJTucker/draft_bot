@@ -361,6 +361,42 @@ def test_the_page_guard_reads_the_slot_map_and_not_merely_the_status(config):
     assert not _banners(told, "budget_order_not_dealt")
 
 
+def test_a_live_draft_on_the_identity_map_is_still_checked(config):
+    """ANTI-CHEAT on the OTHER half of the placeholder guard, the one
+    every board in this module left unpinned.
+
+    The guard reads two facts and its docstring says both are required:
+    the status is still ``pre_draft``, AND the slot map is still the
+    identity. Every fixture next door varies the map, so the status half
+    was free — dropping it left the suite entirely green while changing
+    what the page says on a real board.
+
+    This is that board. ``_keeper_board_poller`` is already ``drafting``
+    on the identity map, which is exactly the shape a league gets when the
+    commissioner never assigns a custom order: the placeholder is never
+    permuted, so it survives into the live draft and stops being a
+    placeholder at all. My roster id is 7 and the map seats it at slot 7,
+    so an override keyed to slot 4 is a real, checkable mis-key here.
+
+    A guard that reads the map alone calls this board provisional, prints
+    "the order is not dealt" over a draft that is underway, and swallows
+    the loud warning naming the flag to type.
+    """
+    rows = _keeper_board_rows()
+
+    live = _keeper_board_poller(config, rows, overrides={MY_DRAFT_SLOT: 96}).step()
+
+    assert live["status"] == "drafting"
+    assert live["me"]["slot"] == PLACEHOLDER_SEAT  # identity map: roster 7 -> slot 7
+    assert live["me"]["budget_is_default"] is True  # the money went to slot 4
+    assert team_by_slot(live, MY_DRAFT_SLOT)["remaining"] == 96
+    (missed,) = _missed_banners(live)
+    assert "--budget 7=AMOUNT" in missed["expected"]
+    assert "slot 4" in missed["actual"]
+    # The placeholder banner belongs to a draft that has not started.
+    assert not _banners(live, "budget_order_not_dealt")
+
+
 def test_the_budget_rule_reads_my_draft_slot_and_not_the_roster_id(config):
     """ANTI-CHEAT for the one property the whole fail-closed budget rule
     rests on: it must read MY DRAFT SLOT.

@@ -354,12 +354,17 @@ def test_replay_cli_accepts_a_real_sheet_csv(tmp_path):
 
 # Live-mode fixtures use the permuted slot map (shared with the state
 # tests), so a rule reading the wrong identifier cannot pass by accident.
-def _live_transport(rosters, *, slots=None, settings=None):
+def _live_transport(rosters, *, slots=None, settings=None, status="pre_draft"):
     """Canned live-mode payloads: the draft object, the rosters (keeper
-    carrier), and an empty picks feed."""
+    carrier), and an empty picks feed.
+
+    ``status`` is a parameter because the startup guard reads it as well
+    as the slot map: a fixture that can only build ``pre_draft`` boards
+    cannot tell a guard that reads both from one that reads the map alone.
+    """
     draft = {
         "draft_id": DRAFT_ID,
-        "status": "pre_draft",
+        "status": status,
         "type": "auction",
         "settings": settings or {},
         "metadata": {},
@@ -622,6 +627,55 @@ def test_startup_draws_no_conclusion_while_the_draft_order_is_a_placeholder(tmp_
         # above all no instruction to re-key it against the placeholder.
         assert "MY draft slot" not in printed
         assert "AMOUNT instead" not in printed
+
+
+def test_startup_reads_the_status_too_and_not_only_the_slot_map(tmp_path):
+    """ANTI-CHEAT on the status half of the shared placeholder predicate,
+    which no CLI board varied before this one.
+
+    The two runs below are the same league, the same identity map and the
+    same mis-keyed flag. The only difference is the draft's status, so
+    nothing but the status half can explain the difference in what gets
+    printed.
+
+    A commissioner who never assigns a custom order leaves the identity
+    map in place while the status moves to ``drafting``. That map is then
+    the real seating, not a placeholder, and the mis-key is checkable — so
+    the guard has to let the check run. Reading the map alone silences the
+    warning there and prints "the order is not assigned yet" over a draft
+    that is underway.
+
+    The poller side of the same pair is pinned in
+    ``tests/test_dashboard_budget.py``, so the status half dies on both
+    surfaces exactly as the map half does.
+    """
+    rosters = _three_keeper_rosters()
+    undealt = io.StringIO()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96"),
+        server=CapturingServer(),
+        out=undealt,
+        http_get=_live_transport(rosters, slots=IDENTITY_SLOTS),
+    )
+
+    assert code == 0
+    assert "order is not assigned yet" in undealt.getvalue()
+    assert "MY draft slot" not in undealt.getvalue()
+
+    live = io.StringIO()
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96"),
+        server=CapturingServer(),
+        out=live,
+        http_get=_live_transport(rosters, slots=IDENTITY_SLOTS, status="drafting"),
+    )
+
+    assert code == 0
+    printed = live.getvalue()
+    assert "order is not assigned yet" not in printed
+    assert "MY draft slot (7)" in printed  # roster 7 seats at slot 7 here
+    assert "--budget 7=AMOUNT" in printed
 
 
 def test_an_explicit_my_slot_is_checked_even_before_the_order_lands(tmp_path):
