@@ -5,6 +5,36 @@ The TestClient drives the real ASGI app; the poll loop is stepped by hand
 ``run_poll_loop`` in a real thread, because that loop is the production
 write path. CLI tests inject a fake server the same way trackdemo injects
 its transport.
+
+WHAT A GREEN SUITE DOES NOT MEAN FOR ``static/index.html``. Nothing here
+executes that file. Its ``<script>`` block is 271 lines and no test in
+this repo runs a line of it: there is no jsdom, no node, no browser. The
+entire guard is substring matching over the HTML the ``/`` route served,
+so it is strong on the exact strings it names and blind to everything
+else about the page. Specifically invisible to it:
+
+* CSS APPENDED BELOW what is pinned. A later ``:root`` re-declaring a
+  token, a higher-specificity rule (``#topbar #max-bid`` beats
+  ``#max-bid.guessed`` 2-0-0), or an ``!important`` anywhere all leave
+  every asserted declaration byte-identical and repaint the page. The
+  counted asserts below close the appended-``:root`` and appended-
+  ``#banners`` cases. Specificity and ``!important`` cannot be closed by
+  any string assert, and both survive a full green run today.
+* A RETARGETED assignment. Sending an asserted class expression to a
+  different element leaves the expression spelled exactly as pinned, and
+  also survives a full green run today.
+* CALL SITES, unless pinned as such. Every render pin except the two
+  below asserts a loop BODY, which a deleted call site leaves untouched.
+* ELEMENT COVERAGE. The script queries 26 ids; the pins below name 12 of
+  them. ``my-remaining``, ``my-caps``, ``my-roster`` and ``max-bid-sub``
+  are among the fourteen queried but unpinned.
+
+The disposition is deliberate: write the limit down rather than keep
+adding pins that cannot reach it, and do not stand up a JavaScript test
+framework for it. **Any change to that page must be verified by actually
+rendering it in a browser and reading the computed styles.** Four review
+rounds have done exactly that, and this docstring is the reason the next
+one has to as well.
 """
 
 from __future__ import annotations
@@ -96,7 +126,10 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     """The static page is one self-contained file (no CDN, no npm) whose
     skeleton binds every element the issue names: nominee, high bid,
     worth, room price, max bid, verdict, profit, last-of-tier, the
-    positional table, team budgets, and my pinned roster."""
+    positional table, team budgets, and my pinned roster.
+
+    The delivery path for the marks and banners named here — the tokens,
+    the CSS rules, the render call sites — is the sibling test below."""
     poller = make_poller(config, [make_tick()], _rows())
     client = TestClient(create_app(poller))
 
@@ -153,7 +186,13 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     assert "'caps' + (guessed || myBudgetImpossible ? ' guessed' : '')" in page
     assert " · BUDGET IMPOSSIBLE: above what my keepers can leave" in page
     assert "(room IMPOSSIBLE ×" in page
-    # The teams table's second mark and the legend clause that reads it.
+    # The teams table's second mark, its SOURCE, and the legend clause
+    # that reads it. The `!` is the only mark in this family that routes
+    # through an alias, and pinning the consumer alone leaves the binding
+    # free: re-sourcing the alias from `s.defaulted_keeper_slots` puts the
+    # `!` on exactly the rows it must never mark and none of the rows it
+    # must (the two sets are disjoint by construction), at exit 0.
+    assert "var impossibleSlots = s.impossible_keeper_slots || [];" in page
     assert "(impossibleSlots.indexOf(t.slot) >= 0 ? ' !' : '')" in page
     assert "above what that team's keepers can possibly leave" in page
     # The amber DECLARATIONS, not merely the selectors. Repointing any of
@@ -208,15 +247,37 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # claims, so reverting it to the pre-fix wording fails here.
     assert "computed from all twelve budgets, not just mine" in page
     assert "SLOT is the DRAFT slot in the first column, not a roster id" in page
-    # The DELIVERY PATH for every mark and every banner above. Each of
-    # these five silences work this file already does while leaving every
-    # assert above spelled exactly as it is, so a green suite was
-    # compatible with an entirely unmarked, bannerless screen.
-    #
+
+
+def _served_page(config):
+    """The page exactly as the ``/`` route serves it."""
+    poller = make_poller(config, [make_tick()], _rows())
+    return TestClient(create_app(poller)).get("/").text
+
+
+def test_index_page_delivers_the_marks_and_banners_it_spells(config):
+    """The DELIVERY PATH for every mark and every banner pinned next door.
+
+    Each of these silences work this file already does while leaving every
+    assert in the sibling test spelled exactly as it is, so a green suite
+    was compatible with an entirely unmarked, bannerless screen.
+
+    Split out of that test rather than appended to it: the combined
+    function crossed pylint's 50-statement ceiling, and splitting beat
+    adding a disable — the same trade the state module made at its own
+    1000-line ceiling.
+    """
+    page = _served_page(config)
+
     # 1. The token itself. Repointing --amber at the accent blue renders
     #    every amber mark on the page as a confident one, and all three
-    #    `var(--amber)` declarations asserted above stay byte-identical.
-    #    Both ends of that swap are pinned, so neither can move.
+    #    `var(--amber)` declarations the sibling test pins stay
+    #    byte-identical.
+    #    A COUNT, not a presence check: an appended second `:root` block
+    #    re-declaring `--amber` wins the cascade while leaving the first
+    #    declaration byte-identical, which is the same attack the banner
+    #    rule below is counted against.
+    assert page.count("--amber:") == 1
     assert "--amber: #ffb454;" in page
     assert "--accent: #5aa9ff;" in page
     # 2. The rule that paints an amber banner. A second `.banner.amber`
@@ -227,15 +288,28 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
         ".banner.amber { background: #3d2c10; color: var(--amber); "
         "border: 1px solid var(--amber); }" in page
     )
-    # 3. The loop that turns settings_warnings into banners at all.
+    # 3. The container those banners are painted into. An appended
+    #    `#banners { display: none; }` hides every banner on the page
+    #    while `.banner.amber` still counts exactly 1, so the container
+    #    rule is counted too. (`#banners:not(:empty)` does not match.)
+    assert page.count("#banners {") == 1
+    # 4. The loop that turns settings_warnings into banners at all.
     #    Deleting it takes EVERY settings banner off the page, including
     #    the budget ones this module tests through /state.
     assert "(s.settings_warnings || []).forEach(function (w) {" in page
     assert "out.push(['amber', 'SETTINGS DIFFER — ' + esc(w.field)" in page
-    # 4. The teams-table asterisk, as a whole expression: the bare key
+    # 5. The two CALL SITES in the normal render path. Everything above
+    #    pins loop BODIES, which survive deleting the call: no banner and
+    #    no team row would reach the page and every assert here would
+    #    still pass. The two-space indent is what distinguishes them from
+    #    `try { renderBanners(s); }` in the crash handler and from
+    #    `renderBanners(lastState || {})` in the disconnected path.
+    assert "  renderBanners(s);" in page
+    assert "  renderTeams(s);" in page
+    # 6. The teams-table asterisk, as a whole expression: the bare key
     #    name survives replacing the conditional with ''.
     assert "(t.budget_is_default ? ' *' : '')" in page
-    # 5. The cache banner's condition. A snapshot key that is read but
+    # 7. The cache banner's condition. A snapshot key that is read but
     #    never branched on is the same as one never read.
     assert "if (s.stale_endpoints && s.stale_endpoints.length)" in page
 
