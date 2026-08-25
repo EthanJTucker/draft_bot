@@ -19,6 +19,12 @@ from draftbot.tracker import (
 
 from .conftest import raw_auction_pick
 
+# The map a draft carries before its order is dealt (slot N = roster N),
+# and the permuted one this league deals over it. Two different maps are
+# what the keeper bridge falls behind.
+_PLACEHOLDER_SLOTS = {slot: slot for slot in range(1, 13)}
+_DEALT_SLOTS = {**_PLACEHOLDER_SLOTS, 4: 7, 7: 11, 11: 4}
+
 
 def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
     # draft-object field a test needs to vary; a builder object adds nothing.
@@ -29,6 +35,7 @@ def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
     status: str = "drafting",
     draft_type: str = "auction",
     stale: frozenset[str] = frozenset(),
+    slots: dict[int, int] | None = None,
 ) -> SourceTick:
     raw_draft = {
         "draft_id": "1389692302259138561",
@@ -36,7 +43,10 @@ def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
         "type": draft_type,
         "settings": {"budget": 200, "teams": 12} | (settings or {}),
         "metadata": metadata or {},
-        "slot_to_roster_id": {str(slot): slot for slot in range(1, 13)},
+        "slot_to_roster_id": {
+            str(slot): roster_id
+            for slot, roster_id in (slots or _PLACEHOLDER_SLOTS).items()
+        },
     }
     return SourceTick(
         draft=parse_draft(raw_draft),
@@ -712,6 +722,43 @@ def test_pause_and_staleness_propagate_to_the_board(config):
     assert board.paused is True
     assert board.status == "drafting"
     assert board.stale_endpoints == frozenset({"picks"})
+
+
+def test_a_bridge_that_carries_no_keepers_has_nothing_to_fall_behind(config):
+    """The stale-bridge rule fires on a MIS-ATTRIBUTION, and a bridge that
+    carries no keeper at all attributes nothing.
+
+    Every figure that rule protects — roster panels, need counts, open
+    slots, the max bid behind them — is slot-keyed and recomputed each
+    tick on a keeper-free board, so the deal moves my slot and nothing
+    else. Blanking the tool there would cost the verdict and buy nothing.
+
+    Narrow but real: startup refuses a keeper league with zero keepers
+    unless ``--allow-no-keepers`` is passed, so this is the operator
+    waving that through because Sleeper's keeper data has not landed, and
+    then losing the verdict the moment the order deals.
+
+    ANTI-CHEAT: both trackers are bridged against the same placeholder and
+    fed the same dealt map, so the ONLY difference is whether anything was
+    bridged. An implementation that stopped comparing the maps, or that
+    read ``keepers_by_slot``'s KEYS (both trackers have twelve) rather
+    than its values, passes the first assert and fails the second.
+    """
+    dealt = _tick(slots=_DEALT_SLOTS)
+    empty = DraftTracker(
+        config,
+        keepers_by_slot={slot: () for slot in _PLACEHOLDER_SLOTS},
+        keeper_slot_map=_PLACEHOLDER_SLOTS,
+    )
+    kept = DraftTracker(
+        config,
+        keepers_by_slot={slot: () for slot in _PLACEHOLDER_SLOTS} | {7: ("KP",)},
+        keeper_slot_map=_PLACEHOLDER_SLOTS,
+    )
+
+    assert empty.update(dealt).keeper_map_stale is False
+    assert not empty.update(dealt).settings_warnings
+    assert kept.update(dealt).keeper_map_stale is True
 
 
 def test_keepers_by_slot_derives_from_rosters_through_the_slot_map():

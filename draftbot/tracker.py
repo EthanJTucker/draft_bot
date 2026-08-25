@@ -400,8 +400,16 @@ class DraftTracker:
         and is issue #23. This is the fail-closed stopgap in front of it:
         on a board whose numbers belong to another team, silence is the one
         answer that cannot be right.
+
+        An EMPTY bridge has nothing to fall behind. Every figure this rule
+        protects is slot-keyed and recomputed each tick, so on a board
+        that carries no keeper at all the deal moves my slot and nothing
+        else; blanking the tool there would cost the verdict and buy
+        nothing.
         """
         if self._keeper_slot_map is None:
+            return False
+        if not any(self._keepers_by_slot.values()):
             return False
         return dict(draft.slot_to_roster_id) != self._keeper_slot_map
 
