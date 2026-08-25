@@ -7,34 +7,36 @@ write path. CLI tests inject a fake server the same way trackdemo injects
 its transport.
 
 WHAT A GREEN SUITE DOES NOT MEAN FOR ``static/index.html``. Nothing here
-executes that file. Its ``<script>`` block is 271 lines and no test in
+executes that file. Its ``<script>`` block is 292 lines and no test in
 this repo runs a line of it: there is no jsdom, no node, no browser. The
 entire guard is substring matching over the HTML the ``/`` route served,
 so it is strong on the exact strings it names and blind to everything
 else about the page. Specifically invisible to it:
 
 * CSS APPENDED BELOW what is pinned. A later ``:root`` re-declaring a
-  token, a higher-specificity rule (``#topbar #max-bid`` beats
-  ``#max-bid.guessed`` 2-0-0), or an ``!important`` anywhere all leave
-  every asserted declaration byte-identical and repaint the page. The
-  counted asserts below close the appended-``:root`` and appended-
-  ``#banners`` cases. Specificity and ``!important`` cannot be closed by
-  any string assert, and both survive a full green run today.
+  token, a rule hiding a container or an item, a higher-specificity rule
+  (``#topbar #max-bid`` beats ``#max-bid.guessed`` 2-0-0), or an
+  ``!important`` anywhere all leave every asserted declaration
+  byte-identical and repaint the page. The counted asserts below close
+  the ``:root``, ``#banners`` and ``.banner`` cases; only specificity and
+  ``!important`` remain, and both survive a full green run today.
 * A RETARGETED assignment. Sending an asserted class expression to a
   different element leaves the expression spelled exactly as pinned, and
   also survives a full green run today.
-* CALL SITES, unless pinned as such. Every render pin except the two
-  below asserts a loop BODY, which a deleted call site leaves untouched.
-* ELEMENT COVERAGE. The script queries 26 ids; the pins below name 12 of
-  them. ``my-remaining``, ``my-caps``, ``my-roster`` and ``max-bid-sub``
-  are among the fourteen queried but unpinned.
+* CALL SITES, and separately the DOM SINKS they write into. Most render
+  pins assert a loop BODY, which survives both deleting the call and
+  retargeting the ``innerHTML`` or ``put`` it feeds. Two call sites and
+  three sinks are pinned below; every other sink is not.
+* ELEMENT COVERAGE. The script queries 26 ids; the id list below names
+  12. ``my-remaining``, ``my-caps``, ``my-roster``, ``max-bid-sub`` and
+  ``verdict-sub`` are among the fourteen it omits, though the write into
+  the last is pinned as a sink.
 
 The disposition is deliberate: write the limit down rather than keep
 adding pins that cannot reach it, and do not stand up a JavaScript test
-framework for it. **Any change to that page must be verified by actually
-rendering it in a browser and reading the computed styles.** Four review
-rounds have done exactly that, and this docstring is the reason the next
-one has to as well.
+framework for it. **Any change to that page must be verified by
+rendering it in a browser and reading the computed styles.** Five review
+rounds have done exactly that, and this docstring is why the next must.
 """
 
 from __future__ import annotations
@@ -184,14 +186,11 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     assert "(s.impossible_keeper_slots || []).indexOf(me.slot) >= 0" in page
     assert " · BUDGET IMPOSSIBLE: above what my keepers can leave" in page
     assert "(room IMPOSSIBLE ×" in page
-    # The THIRD fault behind the same amber, and the only board-wide one:
-    # a keeper bridge the draft order has moved past. Pinned at its SOURCE
-    # on both readers, because it arrives as a plain boolean no other mark
-    # reads — re-sourcing either from `s.paused` marks a board that clears
-    # itself and leaves this one confident, at exit 0. Its own qualifier,
-    # in all three places it renders: reusing BUDGET NOT ENTERED here
-    # would be false, since that money WAS entered and only the seating
-    # behind it moved.
+    # The THIRD fault behind the same amber, and the only board-wide one.
+    # Pinned at its SOURCE on both readers: it arrives as a plain boolean
+    # no other mark reads, so re-sourcing either from `s.paused` marks a
+    # board that clears itself, at exit 0. The qualifier is counted at
+    # three, and is its own: BUDGET NOT ENTERED would be false here.
     assert "var oldOrder = !!s.keeper_map_stale;" in page
     assert "var myOldOrder = !!s.keeper_map_stale;" in page
     assert page.count("OLD DRAFT ORDER — RESTART") == 3
@@ -216,11 +215,9 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # var(--accent) fill leaves the 30px figure in confident blue.
     assert "#max-bid.guessed { color: var(--amber); }" in page
     # The four class assignments that put the amber ON the max bid, its
-    # sub-line, my money and my caps line. Asserted as whole expressions,
-    # not by element id: dropping any conditional back to a bare 'value
-    # num' survives every looser form of this check, and so does dropping
-    # one disjunct out of it. Brittle to reformatting on purpose — an edit
-    # here has to be re-checked in a browser, because nothing runs it.
+    # sub-line, my money and my caps line. Whole expressions, not element
+    # ids: dropping a conditional back to a bare 'value num', or one
+    # disjunct out of it, survives every looser form of this check.
     for class_expression in (
         "'value num' + (guessedBudget || guessedRoom || oldOrder ? ' guessed' : '')",
         "'sub' + (analysis && (guessedBudget || guessedRoom || oldOrder)"
@@ -328,6 +325,18 @@ def test_index_page_delivers_the_marks_and_banners_it_spells(config):
     # 7. The cache banner's condition. A snapshot key that is read but
     #    never branched on is the same as one never read.
     assert "if (s.stale_endpoints && s.stale_endpoints.length)" in page
+    # 8. The DOM SINKS those renders write into, and the banner ITEM
+    #    class. Everything above pins a loop BODY, a CALL SITE or a
+    #    container, and none of that sees the assignment retargeted at a
+    #    detached node, or an appended `.banner { display: none; }` that
+    #    hides red and amber alike while `.banner.amber` and `#banners {`
+    #    each still count 1. Three one-line edits took the banners, every
+    #    team row with its * and ! marks, and the withheld verdict's
+    #    reason off the page at exit 0, spelled above exactly as pinned.
+    assert "document.getElementById('banners').innerHTML = out.map(" in page
+    assert "document.getElementById('teams').innerHTML = (s.teams || []).map(" in page
+    assert "put('verdict-sub', nom.verdict_reason || '')" in page
+    assert page.count(".banner {") == 1
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
