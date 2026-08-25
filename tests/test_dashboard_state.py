@@ -741,7 +741,13 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         "tier",
         "my_cap",
         "max_bid",
+        # Always present, null on every lot the operator's override sheet
+        # says nothing about — which is this fixture, and nearly every
+        # lot. Its SHAPE when it is populated is pinned next to the
+        # override tests, in tests/test_dashboard_overrides.py.
+        "override",
     }
+    assert nomination["analysis"]["override"] is None
     assert set(nomination["analysis"]["tier"]) == {
         "tier",
         "size",
