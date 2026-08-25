@@ -31,6 +31,7 @@ from draftbot.config import LeagueConfig, load_config
 from draftbot.dashboard.sheets import read_sheet_csv, replay_sheet
 from draftbot.dashboard.state import DashboardPoller
 from draftbot.models import DraftState, parse_draft, slot_map_is_provisional
+from draftbot.overrides import PlayerOverride, read_overrides_csv, reconcile_overrides
 from draftbot.sleeper_client import SleeperClient, SleeperUnavailableError
 from draftbot.sources import LivePollSource, ReplaySource
 from draftbot.tracker import (
@@ -150,6 +151,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "league default, is marked on the page, and withholds my verdict",
     )
     parser.add_argument(
+        "--overrides",
+        default=None,
+        metavar="PATH",
+        help="my own override CSV (columns player_id,name,tier,target,"
+        "avoid,delta,note). A signed `delta` moves the model's max bid by "
+        "that many whole dollars, `avoid` forces it to $0, and `target`, "
+        "`tier` and `note` show as chips without touching a number. The "
+        "join is on player_id alone, but a `name` that disagrees with the "
+        "value sheet stops startup. My remaining budget still caps every "
+        "bid, and the page says so when it does",
+    )
+    parser.add_argument(
         "--allow-no-keepers",
         action="store_true",
         help="serve live mode even though this keeper league's rosters "
@@ -232,6 +245,74 @@ def _parse_budget_overrides(
             return None
         overrides[slot] = amount
     return overrides
+
+
+def _read_overrides_or_none(
+    path: str | None, err: TextIO
+) -> dict[str, PlayerOverride] | None:
+    """The override sheet as {player_id: rule}, an empty book when no
+    ``--overrides`` was given, or None after printing why it is unusable.
+
+    Runs BEFORE the network, mirroring ``--budget``: a typo in a file the
+    operator is about to draft off must fail instantly, not after a live
+    draft + rosters round trip. A missing path is fatal for the same
+    reason a malformed row is — a dashboard whose overrides silently are
+    not there looks, on screen, exactly like a sheet of opinions the
+    model happened to agree with.
+    """
+    if path is None:
+        return {}
+    try:
+        return read_overrides_csv(path)
+    except OSError as error:
+        print(f"error: cannot read override CSV {path}: {error}", file=err)
+    except ValueError as error:
+        print(f"error: {error}", file=err)
+    return None
+
+
+def _report_overrides(
+    book: Mapping[str, PlayerOverride], rows, stream: TextIO, err: TextIO
+) -> bool:
+    """Echo what the override sheet actually loaded; False if it is
+    unusable against this value sheet.
+
+    Two lines for the same reason ``--budget`` gets two. What parsed is
+    echoed so the operator can see his file landed at all, because the
+    alternative tell — a max bid that looks about right — is no tell.
+    And an id the sheet does not carry is NOT fatal (an off-sheet rookie
+    is a legitimate target) but is counted out loud: silence would hide a
+    file keyed to an entirely different id space, where every row is
+    inert and nothing on the page would ever say so.
+
+    A name that disagrees with the sheet IS fatal. It is the one mistake
+    an id-only join cannot survive: the right name pasted beside the
+    wrong id tweaks somebody else's price with full confidence.
+    """
+    if not book:
+        return True
+    try:
+        unmatched = reconcile_overrides(book, rows)
+    except ValueError as error:
+        print(f"error: {error}", file=err)
+        return False
+    targets = sum(1 for rule in book.values() if rule.target)
+    avoids = sum(1 for rule in book.values() if rule.avoid)
+    tweaks = sum(1 for rule in book.values() if rule.delta)
+    print(
+        f"dashboard: override sheet: {len(book)} row(s) — {tweaks} dollar "
+        f"tweak(s), {avoids} avoid(s), {targets} target(s)",
+        file=stream,
+    )
+    if unmatched:
+        print(
+            f"warning: {len(unmatched)} of them are not on the value sheet "
+            f"and will only price if nominated ({', '.join(unmatched)}). "
+            "That is fine for a rookie the sheet never priced; if it is "
+            "ALL of them, the file is keyed to the wrong id space",
+            file=err,
+        )
+    return True
 
 
 def _read_sheet_or_none(path: str, err: TextIO):
@@ -318,7 +399,10 @@ def _keepers_missing(args: argparse.Namespace, config: LeagueConfig, keepers) ->
     )
 
 
-def main(
+def main(  # pylint: disable=too-many-locals  # the startup script: one
+    # local per input it validates before anything binds a port.
+    # pylint: disable=too-many-return-statements  # one early return per
+    # thing that can be wrong at startup, each with its own message.
     argv: list[str] | None = None,
     *,
     server=None,
@@ -360,8 +444,17 @@ def main(
     budget_overrides = _parse_budget_overrides(args.budget, config, err)
     if budget_overrides is None:
         return 2
+    # Same reason, same place: a malformed override row must stop startup
+    # before the live draft + rosters round trip, not after it.
+    overrides = _read_overrides_or_none(args.overrides, err)
+    if overrides is None:
+        return 2
     runtime = _build_runtime(args, config, err, http_get=http_get)
     if runtime is None:
+        return 2
+    # The name cross-check needs the value sheet, so it can only run once
+    # the runtime is built — the parse above is what happens early.
+    if not _report_overrides(overrides, runtime[1], stream, err):
         return 2
     poller = _wire_poller(
         runtime,
@@ -369,6 +462,7 @@ def main(
         my_slot=args.my_slot,
         note=_mode_note(args),
         budget_overrides=budget_overrides,
+        overrides=overrides,
     )
     app = create_app(poller)
     interval = args.interval / max(args.accelerate, 1e-9)
@@ -506,13 +600,16 @@ def _mode_note(args: argparse.Namespace) -> str | None:
     return None
 
 
-def _wire_poller(
+def _wire_poller(  # pylint: disable=too-many-arguments  # one keyword
+    # per operator-supplied input the poller carries; bundling them into
+    # a settings object would only hide how many there are.
     runtime,
     config: LeagueConfig,
     *,
     my_slot: int | None,
     note: str | None = None,
     budget_overrides: Mapping[int, int] | None = None,
+    overrides: Mapping[str, PlayerOverride] | None = None,
 ):
     """Tracker + poller over one runtime, wired consistently: the same
     keeper mapping feeds both (the tracker's keeper counts and the
@@ -544,4 +641,5 @@ def _wire_poller(
         keepers_by_slot=keepers,
         my_slot=my_slot,
         note=note,
+        overrides=overrides,
     )

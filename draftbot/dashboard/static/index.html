@@ -43,6 +43,14 @@
   .chip.sold { background: #2a2f3a; color: var(--dim); border: 1px solid var(--dim); }
   .chip.bad { background: #4a1420; color: var(--red); border: 1px solid var(--red); }
   .chip.warn { background: #3d2c10; color: var(--amber); border: 1px solid var(--amber); }
+  /* The two override marks. Deliberately NOT amber: amber on this page
+     means "a figure built on money nobody entered", and an override is
+     the opposite — a number the operator set on purpose. Blue for a
+     dollar tweak (it matches #max-bid, the figure the tweak moved) and
+     green for a target. AVOID reuses .chip.bad: red already means
+     "do not trust this lot", which is exactly what avoid says. */
+  .chip.tweak { background: #10283f; color: var(--accent); border: 1px solid var(--accent); }
+  .chip.target { background: #12351f; color: var(--green); border: 1px solid var(--green); }
 
   .stat { text-align: center; padding: 2px 14px; border-left: 1px solid var(--line); }
   .stat .label { color: var(--dim); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
@@ -224,6 +232,22 @@ function statusChip(nom) {
   return '';
 }
 
+/* The chips for a player my override sheet has an opinion about.
+   Chips only: every dollar figure and every sentence about an override
+   is composed in Python (analysis.override.label) and printed verbatim
+   below, because nothing here is executed by any test. */
+function renderOverride(ov) {
+  if (!ov) return '';
+  var out = '';
+  if (ov.target) out += ' <span class="chip target">TARGET</span>';
+  if (ov.avoid) out += ' <span class="chip bad">AVOID</span>';
+  else if (ov.delta) out += ' <span class="chip tweak">' + esc(signedDollars(ov.delta)) + (ov.clamped ? ' CAPPED' : '') + '</span>';
+  else out += ' <span class="chip tweak">OVERRIDE</span>';
+  if (ov.tier != null) out += ' <span class="chip tweak">TIER ' + esc(ov.tier) + '</span>';
+  if (ov.note) out += ' <span class="chip tweak">' + esc(ov.note) + '</span>';
+  return out;
+}
+
 function renderNomination(s) {
   var nom = s.nomination || {};
   var el = document.getElementById('nominee');
@@ -234,6 +258,7 @@ function renderNomination(s) {
   } else {
     el.textContent = nom.name || nom.player_id;
     var sub = (nom.position ? esc(nom.position) + ' · ' : '') + statusChip(nom);
+    sub += renderOverride(nom.analysis && nom.analysis.override);
     if (nom.nominating_slot != null) sub += ' <span>nominated by slot ' + esc(nom.nominating_slot) + '</span>';
     document.getElementById('nom-sub').innerHTML = sub;
   }
@@ -269,9 +294,16 @@ function renderNomination(s) {
   var maxEl = document.getElementById('max-bid');
   maxEl.textContent = analysis ? dollars(analysis.max_bid) : '—';
   maxEl.className = 'value num' + (guessedBudget || guessedRoom || oldOrder ? ' guessed' : '');
+  // The override sentence goes FIRST, right under the 30px figure it
+  // moved. A tweak the cap ate is the failure mode that costs trust: the
+  // operator sees the un-tweaked number, decides his file did not load,
+  // and stops believing the tool mid-timer. The sentence is Python's
+  // (analysis.override.label) and says model, asked-for, and cap.
+  var overrideLabel = (analysis && analysis.override) ? analysis.override.label + ' · ' : '';
   var capEl = document.getElementById('max-bid-sub');
   capEl.textContent = analysis
-    ? (oldOrder ? 'OLD DRAFT ORDER — RESTART · ' : '') +
+    ? overrideLabel +
+      (oldOrder ? 'OLD DRAFT ORDER — RESTART · ' : '') +
       (guessedBudget ? 'BUDGET NOT ENTERED · ' : '') +
       'cap ' + dollars(analysis.my_cap) +
       ' · infl ×' + analysis.inflation.toFixed(2) +

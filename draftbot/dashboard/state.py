@@ -18,8 +18,9 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 
 from draftbot.config import LeagueConfig
-from draftbot.draft_engine import PlayerAnalysis, analyze_player
+from draftbot.draft_engine import OverrideApplied, PlayerAnalysis, analyze_player
 from draftbot.models import slot_map_is_provisional
+from draftbot.overrides import PlayerOverride
 from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.sources import SourceTick
 from draftbot.tracker import (
@@ -54,7 +55,7 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     bid — at equality I could only match, never beat, so equality is PASS.
 
     Fail-closed by rule. One rule per ``return None`` below, and this list
-    names ALL EIGHT of them in code order: adding a return without adding
+    names ALL NINE of them in code order: adding a return without adding
     its name here is what has silently mis-stated the count before, so the
     list is the thing to keep whole and every count is read off it. No
     verdict on a keeper bridge the draft order has moved out from under, a
@@ -62,10 +63,20 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     at all, a stale (beyond-grace) pointer, a lot the engine could not
     price, a lot with no recorded high bid (an open lot always carries
     one; its absence is suspect data, and a fabricated $0 offer would
-    scream BID), or a MY-BUDGET figure that is the league-wide default
-    rather than a real one. A just-sold lot (within grace) keeps its
-    verdict as the retrospective call the bot was making when the hammer
-    fell.
+    scream BID), a MY-BUDGET figure that is the league-wide default
+    rather than a real one, or a nominee the operator's own override
+    sheet marks AVOID. A just-sold lot (within grace) keeps its verdict
+    as the retrospective call the bot was making when the hammer fell.
+
+    The avoid rule is LAST, behind every rule above it, and the ordering
+    is the point. The eight before it each name something wrong with the
+    DATA; avoid names nothing wrong at all — it is a preference the
+    operator typed, and on a board whose feed cannot be trusted the
+    honest reason is the feed, not his file. It withholds rather than
+    letting the arithmetic answer because the arithmetic answer is
+    correct and useless: ``max_bid`` is $0, so the action reads PASS
+    while the margin reads ``0 - high_bid``, a confident negative figure
+    about a lot that was never in play.
 
     The stale-bridge rule is FIRST, ahead of the seven that predate it and
     without reordering any of them. Each of those seven withholds on one
@@ -134,6 +145,11 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
             f"slot); pass --budget {flag_key}=AMOUNT (DRAFT slot, not "
             "roster id) to advise"
         )
+    if (analysis.get("override") or {}).get("avoid"):
+        return None, (
+            "my override sheet marks this player AVOID, so the max bid is "
+            "$0 and there is no call to make — not a PASS on price"
+        )
     action = "BID" if high_bid < analysis["max_bid"] else "PASS"
     label = "final" if status == NOMINATION_SOLD_GRACE else "live"
     return {
@@ -169,6 +185,7 @@ class DashboardPoller:
         my_slot: int | None = None,
         clock: Callable[[], float] = time.time,
         note: str | None = None,
+        overrides: Mapping[str, PlayerOverride] | None = None,
     ):
         self._source = source
         self._tracker = tracker
@@ -180,6 +197,11 @@ class DashboardPoller:
         }
         self._my_slot = my_slot
         self._clock = clock
+        # The operator's hand-maintained sheet, read once at startup and
+        # then constant for the session. Held here rather than folded
+        # into the rows so the engine stays the single place a number is
+        # decided: this layer hands it over and copies the result.
+        self._overrides = dict(overrides or {})
         # A standing on-page caveat about THIS serving mode (the replay
         # demo's all-PASS/$0 shape); None in live mode.
         self._note = note
@@ -549,6 +571,7 @@ class DashboardPoller:
                 self._config,
                 keepers_by_slot=self._keepers_by_slot,
                 my_slot=my_slot,
+                overrides=self._overrides,
             )
         except ValueError as error:
             return None, str(error)
@@ -580,6 +603,33 @@ class DashboardPoller:
             "tier": tier,
             "my_cap": record.my_cap,
             "max_bid": record.max_bid,
+            # Null on every lot the operator wrote no row for, which is
+            # nearly all of them: a record that EXISTS is the page's cue
+            # to draw a chip, so an all-zero one here would claim an
+            # opinion nobody typed. ``max_bid`` above already has the
+            # override in it — this is the receipt, not the input, and
+            # the page re-adds nothing from it.
+            "override": self._override_json(record.override),
+        }
+
+    @staticmethod
+    def _override_json(applied: OverrideApplied | None) -> dict | None:
+        """The override receipt, or None on an un-listed player."""
+        if applied is None:
+            return None
+        return {
+            "delta": applied.delta,
+            "avoid": applied.avoid,
+            "target": applied.target,
+            "tier": applied.tier,
+            "note": applied.note,
+            "model_max_bid": applied.model_max_bid,
+            "pre_cap": applied.pre_cap,
+            "clamped": applied.clamped,
+            # Composed in the engine, printed verbatim. No test here
+            # executes the page's script, so a sentence assembled there
+            # would be untested prose under a ten-second bid timer.
+            "label": applied.label,
         }
 
     def _team_json(self, team: TeamState, my_slot: int | None) -> dict:

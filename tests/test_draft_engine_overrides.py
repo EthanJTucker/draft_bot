@@ -13,10 +13,10 @@ that reaches for the roster id lands on somebody else's money.
 from __future__ import annotations
 
 from draftbot.draft_engine import analyze_player
-from draftbot.overrides import PlayerOverride
 from draftbot.tracker import BoardState, Sale, TeamState
 
 from .helpers_engine import sheet_row
+from .helpers_overrides import override_book
 
 #: Draft slot -> roster id. A real permutation: no slot holds its own
 #: number, and MY roster id (7) is seated at slot 4.
@@ -72,17 +72,8 @@ def board(sales=(), budgets=None, *, drafted_slots=DRAFTED_SLOTS):
 
 
 def book(**fields):
-    """One override row for ``rb40``, defaults everywhere else."""
-    defaults = {
-        "player_id": "rb40",
-        "name": None,
-        "tier": None,
-        "target": False,
-        "avoid": False,
-        "delta": 0,
-        "note": None,
-    }
-    return {"rb40": PlayerOverride(**{**defaults, **fields})}
+    """One override row for ``rb40``, blank everywhere else."""
+    return override_book("rb40", **fields)
 
 
 def test_the_permuted_map_seats_me_away_from_my_roster_id(config):
