@@ -38,6 +38,7 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from draftbot.config import LeagueConfig
+from draftbot.overrides import PlayerOverride
 from draftbot.tracker import FLEX_ELIGIBLE, BoardState, TeamState
 from draftbot.valuation import FLOOR_PRICE, SheetRow
 
@@ -458,6 +459,36 @@ def build_tiers(
 
 
 @dataclass(frozen=True)
+class OverrideApplied:
+    """What the operator's override sheet did to THIS lot's max bid.
+
+    Carried so the page can say it out loud. A tweak that is silently
+    eaten by the cap is the worst outcome this feature has: the operator
+    reads the un-tweaked number, concludes his file did not load, and
+    stops trusting the tool inside a ten-second bid timer. So the record
+    carries all three numbers and the page renders ``label`` verbatim.
+
+    ``model_max_bid`` is what ``max_bid`` would have been with no
+    override row at all -- directly comparable to the figure the page
+    used to show. ``pre_cap`` is what the override asked for, before
+    ``my_cap``. ``clamped`` is whether ``my_cap`` cut it down.
+    """
+
+    # pylint: disable=too-many-instance-attributes  # derived record type:
+    # the operator's five inputs plus the three numbers the clamp needs.
+
+    delta: int
+    avoid: bool
+    target: bool
+    tier: int | None
+    note: str | None
+    model_max_bid: int
+    pre_cap: int
+    clamped: bool
+    label: str
+
+
+@dataclass(frozen=True)
 class PlayerAnalysis:
     """One nominated player, fully priced: every number the dashboard
     (issue #7) renders, so that slice only formats what is already here.
@@ -469,6 +500,10 @@ class PlayerAnalysis:
     redundant one); ``spend_adjusted`` applies the margin and boost; and
     ``max_bid`` is that number floored to whole dollars and capped by my
     team's max bid.
+
+    ``override`` is None on every lot the operator did not write a row
+    for, which is nearly all of them; when it is set, ``max_bid`` already
+    has the override in it and nothing downstream re-applies anything.
     """
 
     # pylint: disable=too-many-instance-attributes  # derived record type:
@@ -492,6 +527,69 @@ class PlayerAnalysis:
     tier: TierStatus | None
     my_cap: int
     max_bid: int
+    override: OverrideApplied | None = None
+
+
+def _override_label(delta: int, pre_cap: int, model: int, cap: int, avoid: bool) -> str:
+    """The one sentence the page prints under the max bid.
+
+    Composed here rather than assembled in JavaScript on purpose: no test
+    in this repo executes the page's script, so a sentence built there is
+    untested prose on screen during a bid timer. Built here it is pinned
+    like any other number.
+    """
+    if avoid:
+        return "AVOID — marked never bid, max bid forced to $0"
+    if delta > 0:
+        base = f"override +${delta}: model ${model} → ${pre_cap}"
+    elif delta < 0:
+        base = f"override −${-delta}: model ${model} → ${pre_cap}"
+    else:
+        base = "override listed (no dollar change)"
+    if pre_cap > cap:
+        return f"{base}, CAPPED at ${cap} by my remaining budget"
+    return base
+
+
+def _apply_override(
+    model_max_bid: int, my_cap: int, rule: PlayerOverride | None
+) -> tuple[int, OverrideApplied | None]:
+    """The engine's LAST word on the number, and the only place it is
+    decided.
+
+    Order is load-bearing and is floor, then delta, then clamp:
+
+    - The model's dollars are floored FIRST, so the realized effect of a
+      ``+$8`` is exactly $8 and not ``margin × 8``. Folding the delta in
+      further upstream would make it a suggestion the later layers scale.
+    - ``my_cap`` clamps OUTERMOST, because it is not a preference. It is
+      ``remaining - (open_slots - 1)``: arithmetic about what Sleeper
+      will accept while still leaving $1 for every other roster spot. A
+      bid above it is rejected at the wire or strands a slot at $0, so no
+      opinion in a CSV may raise a bid past it.
+    - ``avoid`` yields exactly $0, never the ``max(1, ...)`` floor. "Bid
+      a dollar on a player I marked never" is the off-by-one this whole
+      column exists to prevent; a negative delta still floors at $1,
+      which is what keeps the two levers distinguishable.
+
+    With no rule this is ``min(my_cap, model_max_bid)`` and nothing else
+    -- byte-identical to the pricing that predates the feature.
+    """
+    if rule is None:
+        return min(my_cap, model_max_bid), None
+    pre_cap = 0 if rule.avoid else max(1, model_max_bid + rule.delta)
+    model = min(my_cap, model_max_bid)
+    return min(my_cap, pre_cap), OverrideApplied(
+        delta=rule.delta,
+        avoid=rule.avoid,
+        target=rule.target,
+        tier=rule.tier,
+        note=rule.note,
+        model_max_bid=model,
+        pre_cap=pre_cap,
+        clamped=pre_cap > my_cap,
+        label=_override_label(rule.delta, pre_cap, model, my_cap, rule.avoid),
+    )
 
 
 def _resolve_my_slot(board: BoardState, config: LeagueConfig) -> int:
@@ -537,8 +635,9 @@ def _off_sheet_row(player_id: str) -> SheetRow:
 
 
 def analyze_player(  # pylint: disable=too-many-arguments  # the public
-    # pure-function seam: the four inputs of the contract plus two
-    # keyword-only extras the board cannot carry (keeper ids, replay slot).
+    # pure-function seam: the four inputs of the contract plus three
+    # keyword-only extras the board cannot carry (keeper ids, replay
+    # slot, and the operator's own override sheet).
     player_id: str,
     rows: Sequence[SheetRow],
     board: BoardState,
@@ -546,6 +645,7 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     *,
     keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
     my_slot: int | None = None,
+    overrides: Mapping[str, PlayerOverride] | None = None,
 ) -> PlayerAnalysis:
     # pylint: disable=too-many-locals  # the orchestrator: one local per
     # layer of the record it assembles, each computed by a public helper.
@@ -562,6 +662,18 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     board is worse than stopping), and when the config's roster id is
     not on the board and ``my_slot`` was not passed. An off-sheet
     nominee prices at floor economics and never carries the pace boost.
+
+    ``overrides`` is the operator's hand-maintained sheet, applied at the
+    single point where the dollar figure is decided (see
+    :func:`_apply_override`) and therefore upstream of the frozen record,
+    the ``/state`` JSON and the dashboard verdict alike -- everything
+    downstream sees one consistent number and nothing reprices. Omitting
+    it, or passing a mapping this player is not in, leaves every number
+    below exactly as it was before the feature existed. The suppressed
+    lots stay suppressed for free: the poller never reaches this function
+    on the keeper guard, the sold-before-first-observation path, or the
+    multi-sale recovery tick, so no override can resurrect a number those
+    rules withheld.
     """
     slot = _resolve_my_slot(board, config) if my_slot is None else my_slot
     me = board.team(slot)
@@ -607,9 +719,18 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
         spend_adjusted = _quantize(
             FLOOR_PRICE + (need_adjusted - FLOOR_PRICE) * margin + boost
         )
-        max_bid = min(me.max_bid, max(1, math.floor(_quantize(spend_adjusted))))
+        model_max_bid = max(1, math.floor(_quantize(spend_adjusted)))
     else:
-        spend_adjusted, max_bid = 0.0, 0
+        # A full roster cannot buy anyone. ``me.max_bid`` is 0 here too,
+        # so falling through to the single clamp below reproduces this
+        # branch's old hard-coded 0 exactly -- and, unlike a second
+        # assignment, it cannot be missed when the override folds in. Two
+        # decision sites is how a "+$8" ends up silently no-opping on one
+        # of them while looking right on the other.
+        spend_adjusted, model_max_bid = 0.0, 0
+    max_bid, applied = _apply_override(
+        model_max_bid, me.max_bid, (overrides or {}).get(player_id)
+    )
 
     tier = None
     if not off_sheet:
@@ -635,4 +756,5 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
         tier=tier,
         my_cap=me.max_bid,
         max_bid=max_bid,
+        override=applied,
     )
