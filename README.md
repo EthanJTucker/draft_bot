@@ -229,8 +229,33 @@ silently wrong) unless `--allow-no-keepers` says the league truly kept no
 one. Options: `--config`, `--cache-dir`, `--host`, `--port`,
 `--interval`, `--accelerate`, `--my-slot` (defaults to the config's
 roster id resolved against the draft; an out-of-range slot is rejected at
-startup), `--allow-no-keepers`, `--budget`. Exit codes: 0 served and shut
-down cleanly, 2 nothing ran.
+startup), `--allow-no-keepers`, `--budget`, `--overrides`. Exit codes: 0
+served and shut down cleanly, 2 nothing ran.
+
+`--overrides my_overrides.csv` is the escape hatch for the nights the
+model is wrong about a player. Columns
+`player_id,name,tier,target,avoid,delta,note`, all optional but the
+first. A signed `delta` moves the model's max bid by that many whole
+dollars; `avoid` forces it to exactly $0 (not $1) and withholds the
+verdict rather than calling a PASS on price; `target`, `tier` and `note`
+show as chips beside the nominee and never touch a number. The file is
+yours and is not committed.
+
+The override applies at the single point in the engine where the dollar
+figure is decided, so the `/state` JSON, the frozen record and the page
+cannot disagree about it. Two things worth knowing before draft night.
+First, **my remaining budget still wins**: the cap is
+`remaining - (open_slots - 1)`, arithmetic about what Sleeper accepts
+while leaving $1 a slot, so a `+$400` against a $33 cap displays $33 and
+says `override +$400: model $4 → $404, CAPPED at $33` underneath — a
+tweak that vanished silently is indistinguishable from a file that never
+loaded. Second, **every refusal is loud**: a duplicate `player_id`, an
+unparseable `delta`, a misspelled header, `avoid` beside a positive
+`delta`, or a `name` disagreeing with the value sheet all stop startup
+naming the CSV line. An id the sheet does not carry is the one
+non-failure (an off-sheet rookie is a legitimate target) and is counted
+in the startup banner instead. With no `--overrides` at all, every number
+is exactly what it was before the flag existed.
 
 Per-team budgets are the one number Sleeper may not give you. It carries
 them only as `draft.settings.budget_<slot>`, which exist only once the
