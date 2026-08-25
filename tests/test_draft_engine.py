@@ -116,7 +116,7 @@ class TestPositionalInflation:
         was satisfied by the clamp rather than by the engine. Here every
         reading is off both clamps and three mutants are observable —
         debiting pooled spend (``sum(spent.values())``) drops WR to
-        105/87 = 1.2069 instead of 1.4345, splitting the budget evenly
+        64.2/58 = 1.1069 instead of 1.4345, splitting the budget evenly
         (``money / len(initial)``) reads RB 1.7708 / WR 1.7931, and an
         implementation that ignores sales leaves RB at the opening
         1.4345."""
