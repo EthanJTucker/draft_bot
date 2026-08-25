@@ -53,24 +53,29 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     engine's job): BID exactly when the current high bid is BELOW my max
     bid — at equality I could only match, never beat, so equality is PASS.
 
-    Fail-closed by rule: no verdict on a keeper bridge the draft order has
-    moved out from under, a paused draft, an untrusted picks feed, a stale
-    (beyond-grace) pointer, a lot the engine could not price, a lot with no
-    recorded high bid (an open lot always carries one; its absence is
-    suspect data, and a fabricated $0 offer would scream BID), or a
-    MY-BUDGET figure that is the league-wide default rather than a real
-    one. A just-sold lot (within grace) keeps its verdict as the
-    retrospective call the bot was making when the hammer fell.
+    Fail-closed by rule. One rule per ``return None`` below, and this list
+    names ALL EIGHT of them in code order: adding a return without adding
+    its name here is what has silently mis-stated the count before, so the
+    list is the thing to keep whole and every count is read off it. No
+    verdict on a keeper bridge the draft order has moved out from under, a
+    paused draft, an untrusted picks feed, a board carrying no nomination
+    at all, a stale (beyond-grace) pointer, a lot the engine could not
+    price, a lot with no recorded high bid (an open lot always carries
+    one; its absence is suspect data, and a fabricated $0 offer would
+    scream BID), or a MY-BUDGET figure that is the league-wide default
+    rather than a real one. A just-sold lot (within grace) keeps its
+    verdict as the retrospective call the bot was making when the hammer
+    fell.
 
-    The stale-bridge rule is FIRST, ahead of the six that predate it and
-    without reordering any of them. Every other rule describes this lot or
-    this feed, clears itself as the draft moves on, and leaves the rest of
-    the page true; that one says the keeper lists behind the rosters, the
-    needs, the open slots and the max bid are still on the seats the old
-    draft order gave them, so the inputs the later rules read are
-    themselves mis-attributed. It is also the only reason here that never
-    clears without the operator restarting, so it is the only one worth
-    spending the reason line on.
+    The stale-bridge rule is FIRST, ahead of the seven that predate it and
+    without reordering any of them. Each of those seven withholds on one
+    input this poll can name, and leaves every roster, need and open-slot
+    count sitting on the team that actually owns it; that one says the
+    keeper lists behind the rosters, the needs, the open slots and the max
+    bid are still on the seats the old draft order gave them, so the
+    inputs the later rules read are themselves mis-attributed. It is also
+    the only reason here that never clears without the operator
+    restarting, so it is the only one worth spending the reason line on.
 
     The budget rule is deliberately narrow, and the narrowness is the
     point. It reads MY slot only, and it clears as soon as that slot

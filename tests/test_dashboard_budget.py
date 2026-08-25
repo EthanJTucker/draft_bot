@@ -92,7 +92,7 @@ def test_budget_override_moves_my_real_dollars_not_merely_the_flag(config):
 
 
 def test_verdict_is_suppressed_only_while_my_budget_is_a_guess(config):
-    """The sixth fail-closed rule, and its deliberate limit.
+    """The seventh fail-closed rule, and its deliberate limit.
 
     A BID/PASS call computed off a made-up budget is a confident wrong
     answer, so a defaulted budget suppresses the verdict. But suppressing

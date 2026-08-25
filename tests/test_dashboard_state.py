@@ -330,7 +330,7 @@ def _stale_banners(state):
 
 
 def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(config):
-    """The seventh fail-closed rule, and the only two-map fixture here.
+    """The eighth fail-closed rule, and the only two-map fixture here.
 
     Keeper lists arrive from the rosters keyed by ROSTER ID and are
     bridged onto DRAFT SLOTS once, at startup, through whatever
@@ -344,8 +344,8 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
     then this fails closed: the board is not silently wrong, it stops
     advising and says to restart.
 
-    ANTI-CHEAT, three boards, and each of the trivially-wrong
-    implementations dies on one of them:
+    ANTI-CHEAT, four pollers over seven boards, and each of the
+    trivially-wrong implementations dies on one of them:
 
     * tick 1 is the SAME map the bridge was built on, and it must be
       completely quiet with a live verdict. An implementation that fires
@@ -354,8 +354,8 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
       verdict. An implementation that compares the live map to itself, or
       that decides staleness once and caches it, sees no change on this
       tick and fails.
-    * the third poller's map never moves across two ticks, so a rule that
-      keys on "not the first tick" rather than on the map fails there.
+    * the ``steady`` poller's map never moves across two ticks, so a rule
+      that keys on "not the first tick" rather than on the map fails there.
     * the last two boards are stale AND paused, and stale AND served a
       degraded picks feed. A rule demoted below either predecessor hands
       back that predecessor's reason and fails there.
