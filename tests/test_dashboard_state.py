@@ -419,6 +419,66 @@ def test_keeper_wired_poller_prices_and_renders_the_keeper_board(config):
     )
 
 
+def _keeper_board_rows():
+    """A sheet for the three-keeper fixture: my kept players plus one
+    buyable nominee."""
+    return [
+        sheet_row(1, "K1", "RB", 30.0),
+        sheet_row(2, "K2", "WR", 25.0),
+        sheet_row(3, "K3", "TE", 15.0),
+        sheet_row(4, "B", "WR", 20.0),
+        sheet_row(5, "C", "QB", 11.0),
+    ]
+
+
+def _keeper_board_poller(config, rows, *, overrides=None):
+    """The 2026 shape: three keepers on my slot 7 and a board where
+    Sleeper carries NO budget_<slot> key for anyone."""
+    tracker = DraftTracker(
+        config,
+        keepers_by_slot={7: ("K1", "K2", "K3")},
+        budget_overrides=overrides,
+        clock=lambda: 0.0,
+    )
+    return make_poller(
+        config,
+        [make_tick(nominee="B", offer=5)],
+        rows,
+        keepers_by_slot={7: ("K1", "K2", "K3")},
+        tracker=tracker,
+    )
+
+
+def test_budget_override_moves_my_real_dollars_not_merely_the_flag(config):
+    """ANTI-CHEAT, the point of the fail-closed budget work. Sleeper
+    carries no budget_<slot> key for anyone; my slot 7 holds three
+    keepers, so 12 of my 15 slots are open and my cap is pure
+    subtraction: real budget minus $1 for each of the 11 OTHER open
+    slots. The league default of $200 says $189. My real $96, keyed by
+    hand, says $85.
+
+    An implementation that flips budget_is_default but keeps feeding
+    config.auction_budget to the tracker's TeamState — and through it to
+    my_cap, max_bid, and the inflation numerator — still reads $189 here
+    and fails. Pinning the flag alone would not have caught that."""
+    rows = _keeper_board_rows()
+
+    defaulted = _keeper_board_poller(config, rows).step()
+    assert defaulted["me"]["remaining"] == 200
+    assert defaulted["me"]["max_bid"] == 189
+    assert defaulted["nomination"]["analysis"]["my_cap"] == 189
+    assert team_by_slot(defaulted, 7)["budget_is_default"] is True
+
+    overridden = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    assert overridden["me"]["remaining"] == 96
+    assert overridden["me"]["max_bid"] == 85
+    assert overridden["nomination"]["analysis"]["my_cap"] == 85
+    assert team_by_slot(overridden, 7)["budget_is_default"] is False
+    # The room's other eleven slots were NOT overridden, so they stay
+    # honestly labeled as defaulted.
+    assert team_by_slot(overridden, 3)["budget_is_default"] is True
+
+
 def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
     """The static page binds these exact field names; any rename anywhere
     in the snapshot (players-row worth, settings_warnings field, roster

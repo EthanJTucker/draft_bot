@@ -101,6 +101,44 @@ def test_budgets_seed_from_budget_slot_and_fall_back_to_config_default(config):
     assert defaulted.open_slots == 15  # no keepers known, nothing bought
 
 
+def test_manual_budget_override_fills_a_slot_sleeper_never_carried(config):
+    """The operator's `--budget SLOT=AMOUNT` lever, keyed from the league
+    sheet when the commissioner never enters budget_<slot>.
+
+    Anti-cheat on all three sides at once: slot 5 is overridden and must
+    report the OVERRIDE ($96, not the $200 default and not defaulted),
+    slot 4 is untouched and must still report the default AND still be
+    labeled defaulted (a blanket clear of the flag fails here), and the
+    override must move the real spendable numbers, not just the flag —
+    $96 across 15 open slots is a max bid of $82, where the default
+    would say $186."""
+    tracker = DraftTracker(config, budget_overrides={5: 96})
+    board = tracker.update(_tick())
+
+    overridden = board.team(5)
+    assert overridden.budget == 96
+    assert overridden.budget_is_default is False
+    assert overridden.remaining == 96
+    assert overridden.max_bid == 82  # 96 - 14 held for the other open slots
+
+    untouched = board.team(4)
+    assert untouched.budget == 200
+    assert untouched.budget_is_default is True
+    assert untouched.max_bid == 186
+
+
+def test_sleeper_budget_key_outranks_a_manual_override(config):
+    """Precedence, pinned: once the commissioner enters budget_<slot> the
+    live draft object is authoritative and a stale hand-keyed override
+    for the same slot is ignored. Reversing the precedence reads $96 here."""
+    tracker = DraftTracker(config, budget_overrides={5: 96})
+    board = tracker.update(_tick(settings={"budget_5": 143}))
+
+    team = board.team(5)
+    assert team.budget == 143
+    assert team.budget_is_default is False
+
+
 def test_nominee_in_the_sold_set_never_renders_live(config):
     """Anti-cheat: the stale pointer can lag MORE than one lot. This nominee
     was sold two picks ago, so a guard that only string-compares against the

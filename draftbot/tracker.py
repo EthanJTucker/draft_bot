@@ -223,6 +223,7 @@ class DraftTracker:
         player_positions: Mapping[str, str] | None = None,
         expected_settings: Mapping[str, object] | None = None,
         value_sheet: Mapping[str, float] | None = None,
+        budget_overrides: Mapping[int, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
     ):
@@ -230,6 +231,10 @@ class DraftTracker:
         self._player_positions = dict(player_positions or {})
         self._expected_settings = dict(expected_settings or {})
         self._value_sheet = None if value_sheet is None else dict(value_sheet)
+        # Hand-keyed real budgets for slots Sleeper never carried. Sleeper
+        # is still authoritative where it speaks: an override only fills a
+        # hole, so a commissioner entry always outranks a stale hand entry.
+        self._budget_overrides = dict(budget_overrides or {})
         self._keepers_by_slot = {
             slot: tuple(players) for slot, players in (keepers_by_slot or {}).items()
         }
@@ -348,7 +353,13 @@ class DraftTracker:
     def _team_state(self, slot: int, tick: SourceTick) -> TeamState:
         purchases = [pick for pick in tick.picks if pick.draft_slot == slot]
         keepers = self._keepers_by_slot.get(slot, ())
+        # Real money first (Sleeper, then the operator's hand-keyed
+        # override), and ONLY then the league-wide default — which is a
+        # fiction on a keeper board, so the flag it raises must survive
+        # all the way to the page and the verdict.
         budget = tick.draft.budget_by_slot.get(slot)
+        if budget is None:
+            budget = self._budget_overrides.get(slot)
         open_slots = max(0, self._config.drafted_slots - len(keepers) - len(purchases))
         positions = [self._player_positions.get(player_id) for player_id in keepers]
         positions.extend(
