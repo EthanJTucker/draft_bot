@@ -287,13 +287,16 @@ def _stale_map_rows():
     ]
 
 
-def _bridged_poller(config, rows, startup_slots, tick_slots):
+def _bridged_poller(config, rows, startup_slots, tick_slots, **tick_kwargs):
     """A poller whose keeper bridge was built against ``startup_slots``,
     then fed one tick per entry in ``tick_slots``.
 
     This is the only fixture in the suite that drives two DIFFERENT slot
     maps through one poller, which is the whole shape of the defect: the
     bridge is built once and the board is re-read every tick.
+
+    ``tick_kwargs`` go to every tick, which is how a stale board can also
+    carry one of the conditions this rule has to outrank.
     """
     keepers = {
         slot: _MY_KEEPERS if roster_id == config.my_roster_id else ()
@@ -307,7 +310,11 @@ def _bridged_poller(config, rows, startup_slots, tick_slots):
     )
     entries = [
         make_tick(
-            nominee=_NOMINEE, offer=5, budgets=_FUNDED_ROOM, slot_to_roster_id=slots
+            nominee=_NOMINEE,
+            offer=5,
+            budgets=_FUNDED_ROOM,
+            slot_to_roster_id=slots,
+            **tick_kwargs,
         )
         for slots in tick_slots
     ]
@@ -349,6 +356,9 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
       tick and fails.
     * the third poller's map never moves across two ticks, so a rule that
       keys on "not the first tick" rather than on the map fails there.
+    * the last two boards are stale AND paused, and stale AND served a
+      degraded picks feed. A rule demoted below either predecessor hands
+      back that predecessor's reason and fails there.
 
     The mis-attribution itself is measured, not assumed: on the permuted
     tick my roster panel is empty and my three keepers are still counted
@@ -397,6 +407,25 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
         state = steady.step()
         assert not _stale_banners(state)
         assert state["nomination"]["verdict"] is not None
+
+    # And it LEADS the chain. These two boards are stale AND carry a
+    # predecessor, which is the pairing draft night actually produces: a
+    # commissioner very plausibly pauses the draft to assign the order,
+    # and the picks feed is at its most unsettled at draft start. The
+    # rule's whole argument is that those clear themselves while this one
+    # never does without an operator action, so demoting it below either
+    # hands back the predecessor's reason and fails here.
+    paused_board = _bridged_poller(
+        config, rows, IDENTITY_SLOTS, [PERMUTED_SLOTS], paused=True
+    ).step()
+    assert paused_board["paused"] is True  # the predecessor really is true
+    assert "RESTART" in paused_board["nomination"]["verdict_reason"]
+
+    untrusted_board = _bridged_poller(
+        config, rows, IDENTITY_SLOTS, [PERMUTED_SLOTS], stale=("picks",)
+    ).step()
+    assert untrusted_board["nomination"]["status"] == "untrusted"
+    assert "RESTART" in untrusted_board["nomination"]["verdict_reason"]
 
 
 def test_source_outage_keeps_serving_the_last_good_state(config):
