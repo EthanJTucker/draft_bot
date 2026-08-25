@@ -47,19 +47,29 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     *,
     budget_is_default: bool = False,
     my_slot: int | None = None,
+    keeper_map_stale: bool = False,
 ) -> tuple[dict | None, str]:
     """The plain BID/PASS call, deliberately simple (nuance is the
     engine's job): BID exactly when the current high bid is BELOW my max
     bid — at equality I could only match, never beat, so equality is PASS.
 
-    Fail-closed by rule: no verdict on a paused draft, an untrusted picks
-    feed, a stale (beyond-grace) pointer, a lot the engine could not
-    price, a lot with no recorded high bid (an open lot always carries
-    one; its absence is suspect data, and a fabricated $0 offer would
-    scream BID), or a MY-BUDGET figure that is the league-wide default
-    rather than a real one. A just-sold lot (within grace) keeps its
-    verdict as the retrospective call the bot was making when the hammer
-    fell.
+    Fail-closed by rule: no verdict on a keeper bridge the draft order has
+    moved out from under, a paused draft, an untrusted picks feed, a stale
+    (beyond-grace) pointer, a lot the engine could not price, a lot with no
+    recorded high bid (an open lot always carries one; its absence is
+    suspect data, and a fabricated $0 offer would scream BID), or a
+    MY-BUDGET figure that is the league-wide default rather than a real
+    one. A just-sold lot (within grace) keeps its verdict as the
+    retrospective call the bot was making when the hammer fell.
+
+    The stale-bridge rule is FIRST, ahead of the five that predate it and
+    without reordering any of them. Every other rule describes this lot or
+    this feed, clears itself as the draft moves on, and leaves the rest of
+    the page true; that one says the roster, the needs, the open slots and
+    the max bid all belong to another team, so the inputs the later rules
+    read are themselves mis-attributed. It is also the only reason here
+    that never clears without the operator restarting, so it is the only
+    one worth spending the reason line on.
 
     The budget rule is deliberately narrow, and the narrowness is the
     point. It reads MY slot only, and it clears as soon as that slot
@@ -77,6 +87,13 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     it as a room default while any keeper-holding slot is still uncovered,
     on top of the standing settings banner and the per-team flag.
     """
+    if keeper_map_stale:
+        return None, (
+            "the draft order changed after this dashboard started, so its "
+            "keeper lists, my roster panel, my open slots and my max bid "
+            "all belong to whichever team held my seat before; RESTART the "
+            "dashboard to rebuild them — not advising until you do"
+        )
     if paused:
         return None, "draft paused"
     if status == NOMINATION_UNTRUSTED:
@@ -367,6 +384,7 @@ class DashboardPoller:
             error,
             budget_is_default=self._budget_is_default(board, my_slot),
             my_slot=my_slot,
+            keeper_map_stale=board.keeper_map_stale,
         )
         if verdict is not None and "draft" in board.stale_endpoints:
             # The draft object is the ONLY carrier of the nomination

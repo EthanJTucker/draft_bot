@@ -20,6 +20,7 @@ from draftbot.valuesheet import write_csv
 
 from .conftest import REPO_ROOT, FakeTransport
 from .helpers_dashboard import (
+    IDENTITY_SLOTS,
     MY_DRAFT_SLOT,
     PERMUTED_SLOTS,
     make_poller,
@@ -572,7 +573,13 @@ def test_startup_echoes_the_overrides_and_shouts_when_they_miss_my_slot(tmp_path
     assert "MY draft slot" not in quiet.getvalue()
 
 
-IDENTITY_SLOTS = {slot: slot for slot in range(1, 13)}
+def _stale_map_banners(state):
+    """The RESTART banner for a keeper bridge the order has moved past."""
+    return [
+        warning
+        for warning in state["settings_warnings"]
+        if warning["field"] == "keeper_map_stale"
+    ]
 
 
 def test_startup_draws_no_conclusion_while_the_draft_order_is_a_placeholder(tmp_path):
@@ -688,6 +695,63 @@ def test_a_mis_keyed_override_is_named_in_a_banner_once_sleeper_carries_keys(tmp
     ]
     assert "slot 7 = $96" in banner["expected"]
     assert "slot 7 = $150" in banner["actual"]
+
+
+def test_the_order_landing_mid_session_stops_the_live_dashboard(tmp_path):
+    """The startup keeper bridge, pinned through the real CLI wiring.
+
+    Keeper lists come from the rosters keyed by ROSTER ID and are bridged
+    onto DRAFT SLOTS exactly once, here, against the map the draft carried
+    at startup. Nothing re-fetches the rosters, so when the commissioner
+    deals the order mid-session that bridge starts describing the room the
+    placeholder described, while my own slot is re-resolved from the live
+    board every poll — the MY TEAM panel then belongs to whoever held my
+    old seat.
+
+    The full re-derivation is issue #23. This pins the stopgap end to end,
+    and above all pins the WIRING: `keeper_slot_map` is handed to the
+    tracker only here, so deleting that one argument disarms the guard for
+    the whole product while every unit test around it still passes.
+
+    The mis-attribution is measured on both sides of the deal, so the
+    banner is pinned against a real failure. The withheld reason is the
+    RESTART one and not "no nomination data", which is where this rule
+    sits in the fail-closed order: ahead of all five that came before it,
+    because they describe one lot while this describes the whole board.
+    """
+    transport = _live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS)
+    server = CapturingServer()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path)),
+        server=server,
+        out=io.StringIO(),
+        http_get=transport,
+    )
+
+    assert code == 0
+    before = server.poller.step()
+    assert before["me"]["slot"] == 7  # placeholder seat: roster 7 at slot 7
+    assert [entry["player_id"] for entry in before["me"]["roster"]] == [
+        "KP",
+        "K2",
+        "K3",
+    ]
+    assert not _stale_map_banners(before)
+    assert before["nomination"]["verdict_reason"] == "no nomination data"
+
+    # The commissioner deals the order while the dashboard is up.
+    transport.payloads[f"/draft/{DRAFT_ID}"]["slot_to_roster_id"] = {
+        str(slot): roster_id for slot, roster_id in PERMUTED_SLOTS.items()
+    }
+
+    after = server.poller.step()
+    assert after["me"]["slot"] == MY_DRAFT_SLOT  # roster 7 now drafts from slot 4
+    assert after["me"]["roster"] == []  # my keepers still hang on slot 7
+    (stale,) = _stale_map_banners(after)
+    assert "RESTART" in stale["actual"]
+    assert after["nomination"]["verdict"] is None
+    assert "RESTART" in after["nomination"]["verdict_reason"]
 
 
 def test_cli_rejects_malformed_budget_overrides():

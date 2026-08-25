@@ -216,6 +216,12 @@ class BoardState:
     # Sleeper key IS a real key, so budget_is_default reads False and the
     # render layer would paint proven-wrong money like correct money.
     impossible_keeper_slots: tuple[int, ...] = ()
+    # True once the draft order has moved out from under the keeper lists
+    # this tracker was built with, which puts every keeper-derived figure
+    # (roster panel, needs, open slots, max bid) on the wrong team. It
+    # rides the board rather than being re-derived from the banner's
+    # wording, so the banner and the suppressed verdict cannot disagree.
+    keeper_map_stale: bool = False
 
     def team(self, slot: int) -> TeamState:
         """The team drafting from ``slot``."""
@@ -250,6 +256,7 @@ class DraftTracker:
         config: LeagueConfig,
         *,
         keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
+        keeper_slot_map: Mapping[int, int] | None = None,
         player_positions: Mapping[str, str] | None = None,
         expected_settings: Mapping[str, object] | None = None,
         value_sheet: Mapping[str, float] | None = None,
@@ -271,6 +278,16 @@ class DraftTracker:
         self._keepers_by_slot = {
             slot: tuple(players) for slot, players in (keepers_by_slot or {}).items()
         }
+        # The slot-to-roster map ``keepers_by_slot`` was bridged through.
+        # Rosters carry keepers by ROSTER ID and this mapping is keyed by
+        # DRAFT SLOT, so it is only true of the order in force when it was
+        # built — and this league deals that order at draft time, often
+        # while the dashboard is already up. None declares no bridge and
+        # turns the staleness check off: a hand-built keeper mapping owns
+        # its own slots and has no startup map to fall behind.
+        self._keeper_slot_map = (
+            None if keeper_slot_map is None else dict(keeper_slot_map)
+        )
         self._clock = clock
         self._grace_seconds = grace_seconds
         # Cross-tick watermark: the most picks this tracker has ever seen.
@@ -308,13 +325,19 @@ class DraftTracker:
         # Computed once and used twice, so the banner's wording and the
         # page's marks can never name different slots.
         breaches = self._ceiling_breaches(tick.draft)
+        # Same discipline: one evaluation feeds both the RESTART banner and
+        # the flag the verdict fails closed on.
+        keeper_map_stale = self._keeper_map_is_stale(tick.draft)
         return BoardState(
             status=tick.draft.status,
             paused=tick.draft.paused,
             teams=tuple(self._team_state(slot, tick) for slot in self._slots(tick)),
             nomination=self._resolve_nomination(tick.draft, sold, picks_trusted),
-            settings_warnings=self._settings_warnings(tick.draft, breaches),
+            settings_warnings=self._settings_warnings(
+                tick.draft, breaches, keeper_map_stale
+            ),
             impossible_keeper_slots=tuple(slot for slot, _ in breaches),
+            keeper_map_stale=keeper_map_stale,
             off_model_player_ids=self._off_model(tick),
             stale_endpoints=tick.stale_endpoints,
             sales=tuple(
@@ -336,17 +359,84 @@ class DraftTracker:
         )
 
     def _settings_warnings(
-        self, draft: DraftState, breaches: Sequence[tuple[int, str]]
+        self,
+        draft: DraftState,
+        breaches: Sequence[tuple[int, str]],
+        keeper_map_stale: bool,
     ) -> tuple[SettingsMismatch, ...]:
         """Assumption diffs, the pre-entry keeper condition, the real
-        budget a hand-keyed ``--budget`` override discards, and money no
-        keeper roster could have left over — none of which the operator
-        should have to discover from a wrong number."""
-        warnings = list(diff_settings(draft, self._expected_settings))
+        budget a hand-keyed ``--budget`` override discards, money no
+        keeper roster could have left over, and a keeper bridge the draft
+        order has moved out from under — none of which the operator should
+        have to discover from a wrong number.
+
+        The stale-bridge banner leads. Every other banner here describes a
+        number that is wrong; that one says the whole page is describing
+        the wrong teams, and it is the only one whose remedy is an action
+        the operator has to take.
+        """
+        warnings = self._keeper_map_warnings(draft) if keeper_map_stale else []
+        warnings.extend(diff_settings(draft, self._expected_settings))
         warnings.extend(self._keeper_budget_warnings(draft))
         warnings.extend(self._override_warnings(draft))
         warnings.extend(_ceiling_warnings(breaches))
         return tuple(warnings)
+
+    def _keeper_map_is_stale(self, draft: DraftState) -> bool:
+        """Whether the draft order has moved since the keeper lists were
+        bridged onto draft slots.
+
+        ``keepers_by_slot`` is built once, at startup, from the rosters'
+        roster-id-keyed keeper lists and whatever ``slot_to_roster_id`` the
+        draft carried at that instant. Nothing re-fetches the rosters, so
+        when the commissioner deals the order the two halves of the board
+        stop describing the same team: the render layer re-resolves my slot
+        from the live map every tick, while my keepers, needs, open slots
+        and the max bid computed from them stay on the seat the old order
+        gave them.
+
+        The full repair is to hold the keeper lists by ROSTER ID and
+        re-derive the slot mapping every tick, which re-plumbs this seam
+        and is issue #23. This is the fail-closed stopgap in front of it:
+        on a board whose numbers belong to another team, silence is the one
+        answer that cannot be right.
+        """
+        if self._keeper_slot_map is None:
+            return False
+        return dict(draft.slot_to_roster_id) != self._keeper_slot_map
+
+    def _keeper_map_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+        """The RESTART banner, naming the slots that moved.
+
+        Nothing on the page can be re-keyed to fix this and no flag
+        corrects it, so the banner asks for the one thing that does: a
+        restart, which rebuilds the bridge against the order now in force.
+        """
+        frozen = self._keeper_slot_map or {}
+        live = dict(draft.slot_to_roster_id)
+        moved = sorted(
+            slot
+            for slot in set(frozen) | set(live)
+            if frozen.get(slot) != live.get(slot)
+        )
+        return [
+            SettingsMismatch(
+                field="keeper_map_stale",
+                expected=(
+                    "the draft order this dashboard's keeper lists were "
+                    "built against at startup"
+                ),
+                actual=(
+                    "the order changed while the dashboard was running "
+                    f"(draft slots {', '.join(str(slot) for slot in moved)} "
+                    "now seat different rosters), so every keeper list, "
+                    "roster panel, need count and open-slot count still "
+                    "sits on the seat the old order gave it — RESTART the "
+                    "dashboard to rebuild them; the verdict stays withheld "
+                    "until you do"
+                ),
+            )
+        ]
 
     def uncovered_keeper_slots(self, draft: DraftState) -> tuple[int, ...]:
         """Keeper-holding DRAFT SLOTS showing the league-wide default

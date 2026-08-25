@@ -44,6 +44,12 @@ PERMUTED_SLOTS = {
 }
 MY_DRAFT_SLOT = 4
 
+# The PLACEHOLDER map a draft carries before its order is dealt: slot N =
+# roster N. Spelled out rather than left to ``make_tick``'s default,
+# because the fixtures that pair it with PERMUTED_SLOTS are about the
+# moment one becomes the other.
+IDENTITY_SLOTS = {slot: slot for slot in range(1, 13)}
+
 
 class ScriptedSource:
     """poll() serves scripted entries in order (the last one repeats);

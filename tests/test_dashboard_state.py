@@ -20,6 +20,9 @@ from draftbot.tracker import DraftTracker
 from .conftest import raw_auction_pick
 from .helpers_dashboard import (
     ENTERED_BUDGETS,
+    IDENTITY_SLOTS,
+    MY_DRAFT_SLOT,
+    PERMUTED_SLOTS,
     make_poller,
     make_tick,
     team_by_slot,
@@ -260,6 +263,140 @@ def test_paused_draft_never_carries_a_verdict(config):
     assert state["paused"] is True
     assert state["nomination"]["verdict"] is None
     assert state["nomination"]["verdict_reason"] == "draft paused"
+
+
+# Every slot funded for real, at a figure three keepers can leave: this
+# family is about the keeper BRIDGE, so nothing here may be explained by a
+# defaulted budget or an impossible one.
+_FUNDED_ROOM = {slot: 96 for slot in range(1, 13)}
+# The keeper lists as `keepers_by_slot_from_rosters` builds them at
+# startup: my roster id is 7, and on the placeholder map roster 7 sits at
+# draft slot 7.
+_MY_KEEPERS = ("KA", "KB", "KC")
+# The one buyable player on the sheet, so the nominated lot prices.
+_NOMINEE = "N"
+
+
+def _stale_map_rows():
+    """My three kept players plus the single buyable nominee."""
+    return [
+        sheet_row(1, "KA", "QB", 28.0, name="Kept Passer"),
+        sheet_row(2, "KB", "RB", 22.0, name="Kept Back"),
+        sheet_row(3, "KC", "TE", 12.0, name="Kept End"),
+        sheet_row(4, _NOMINEE, "WR", 18.0, name="The Nominee"),
+    ]
+
+
+def _bridged_poller(config, rows, startup_slots, tick_slots):
+    """A poller whose keeper bridge was built against ``startup_slots``,
+    then fed one tick per entry in ``tick_slots``.
+
+    This is the only fixture in the suite that drives two DIFFERENT slot
+    maps through one poller, which is the whole shape of the defect: the
+    bridge is built once and the board is re-read every tick.
+    """
+    keepers = {
+        slot: _MY_KEEPERS if roster_id == config.my_roster_id else ()
+        for slot, roster_id in startup_slots.items()
+    }
+    tracker = DraftTracker(
+        config,
+        keepers_by_slot=keepers,
+        keeper_slot_map=startup_slots,
+        clock=lambda: 0.0,
+    )
+    entries = [
+        make_tick(
+            nominee=_NOMINEE, offer=5, budgets=_FUNDED_ROOM, slot_to_roster_id=slots
+        )
+        for slots in tick_slots
+    ]
+    return make_poller(config, entries, rows, keepers_by_slot=keepers, tracker=tracker)
+
+
+def _stale_banners(state):
+    return [
+        warning
+        for warning in state["settings_warnings"]
+        if warning["field"] == "keeper_map_stale"
+    ]
+
+
+def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(config):
+    """The seventh fail-closed rule, and the only two-map fixture here.
+
+    Keeper lists arrive from the rosters keyed by ROSTER ID and are
+    bridged onto DRAFT SLOTS once, at startup, through whatever
+    ``slot_to_roster_id`` the draft carried then. Nothing re-fetches the
+    rosters. My slot, though, is re-resolved from the live board every
+    tick — so the moment the commissioner deals the order the two halves
+    describe different teams, and the panel labelled MY TEAM lists players
+    the operator does not own, with the needs and the max bid to match.
+
+    The full repair re-derives the bridge every tick (issue #23). Until
+    then this fails closed: the board is not silently wrong, it stops
+    advising and says to restart.
+
+    ANTI-CHEAT, three boards, and each of the trivially-wrong
+    implementations dies on one of them:
+
+    * tick 1 is the SAME map the bridge was built on, and it must be
+      completely quiet with a live verdict. An implementation that fires
+      whenever a startup map was declared fails here.
+    * tick 2 permutes it, and must raise the banner AND withhold the
+      verdict. An implementation that compares the live map to itself, or
+      that decides staleness once and caches it, sees no change on this
+      tick and fails.
+    * the third poller's map never moves across two ticks, so a rule that
+      keys on "not the first tick" rather than on the map fails there.
+
+    The mis-attribution itself is measured, not assumed: on the permuted
+    tick my roster panel is empty and my three keepers are still counted
+    against slot 7, which is now somebody else.
+    """
+    rows = _stale_map_rows()
+    poller = _bridged_poller(
+        config, rows, IDENTITY_SLOTS, [IDENTITY_SLOTS, PERMUTED_SLOTS]
+    )
+
+    fresh = poller.step()
+    assert fresh["me"]["slot"] == 7  # placeholder seat: roster 7 at slot 7
+    assert [entry["player_id"] for entry in fresh["me"]["roster"]] == list(_MY_KEEPERS)
+    assert not _stale_banners(fresh)
+    assert fresh["nomination"]["verdict"] is not None
+
+    dealt = poller.step()
+    assert dealt["me"]["slot"] == MY_DRAFT_SLOT  # roster 7 now drafts from slot 4
+    # The defect, measured. The bridge still hangs my keepers on slot 7.
+    assert dealt["me"]["roster"] == []
+    assert dealt["me"]["open_slots"] == 15  # three keepers unaccounted for
+    assert team_by_slot(dealt, 7)["open_slots"] == 12
+    # So the tool stops, loudly, in the one way the operator can act on.
+    (stale,) = _stale_banners(dealt)
+    assert "RESTART" in stale["actual"]
+    assert dealt["nomination"]["analysis"] is not None  # priced; the CALL is withheld
+    assert dealt["nomination"]["verdict"] is None
+    assert "RESTART" in dealt["nomination"]["verdict_reason"]
+    # Nothing else on this board can explain the suppression.
+    assert dealt["me"]["budget_is_default"] is False
+    assert dealt["paused"] is False
+    assert dealt["nomination"]["status"] == "live"
+
+    # And it STAYS stopped. The comparison is against the map the bridge
+    # was built on, not against the previous tick: a rule that re-baselines
+    # each poll fires once at the transition and then hands back a
+    # confident verdict on a board that is still wrong.
+    still = poller.step()
+    assert _stale_banners(still)
+    assert still["nomination"]["verdict"] is None
+
+    steady = _bridged_poller(
+        config, rows, PERMUTED_SLOTS, [PERMUTED_SLOTS, PERMUTED_SLOTS]
+    )
+    for _ in range(2):
+        state = steady.step()
+        assert not _stale_banners(state)
+        assert state["nomination"]["verdict"] is not None
 
 
 def test_source_outage_keeps_serving_the_last_good_state(config):

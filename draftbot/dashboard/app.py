@@ -517,11 +517,20 @@ def _wire_poller(
     """Tracker + poller over one runtime, wired consistently: the same
     keeper mapping feeds both (the tracker's keeper counts and the
     engine's keeper exclusions must never disagree), and the same sheet
-    provides positions, off-model flagging, and pricing."""
-    source, rows, keepers, _draft = runtime
+    provides positions, off-model flagging, and pricing.
+
+    The startup draft's slot map rides along with the keeper mapping it
+    was bridged through. Nothing re-fetches the rosters, so once the
+    commissioner deals the order that mapping describes a different room
+    than the live board does; handing the tracker the map it was built on
+    is what lets it notice and fail closed instead of quietly attributing
+    my keepers to the team that used to hold my seat.
+    """
+    source, rows, keepers, draft = runtime
     tracker = DraftTracker(
         config,
         keepers_by_slot=keepers,
+        keeper_slot_map=draft.slot_to_roster_id,
         player_positions={row.player_id: row.position for row in rows},
         expected_settings=default_expected_settings(config),
         value_sheet=value_map(rows),

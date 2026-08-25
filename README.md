@@ -205,10 +205,10 @@ PASS), profit as price-minus-value centered at $0, and the last-of-tier
 warning. Below it: the sortable/filterable positional table of remaining
 players, every team's budget as remaining dollars (never spent) with open
 slots and max possible bid, and my roster and remaining budget pinned.
-Fail-closed rendering: an untrusted picks feed, a cache-served draft
-object, a paused draft, a lot with no recorded high bid, or a budget
-nobody entered for my slot shows a banner or reason and suppresses the
-verdict; any poll failure (source outage or
+Fail-closed rendering: a draft order dealt after startup, an untrusted
+picks feed, a cache-served draft object, a paused draft, a lot with no
+recorded high bid, or a budget nobody entered for my slot shows a banner
+or reason and suppresses the verdict; any poll failure (source outage or
 processing error) keeps serving the last good state labeled as such; and
 a nomination pointer naming a just-sold player is priced against the
 pre-sale board and labeled final — or refuses with the reason when no
@@ -270,6 +270,26 @@ banner names the flag to type whenever overrides were given and my own
 money is still the default. An explicit `--my-slot` is exempt from the
 placeholder rule on both surfaces, because that number came from me and
 not from the map.
+
+Keeper lists are the other thing that order moves. They arrive from the
+rosters keyed by roster id and are bridged onto draft slots exactly once,
+at startup, through whatever map the draft carried then; nothing
+re-fetches the rosters afterwards. So a dashboard launched before the
+order is dealt is bridged against the placeholder, and when the real
+order lands that bridge still describes the old seating while my own slot
+re-resolves correctly from the live board. Rather than show one team's
+keepers, needs, and open slots under another team's heading, the page
+raises a banner naming the slots that moved and stops advising. **The
+remedy is a restart**, which rebuilds the bridge against the order now in
+force. Launching after the order is dealt never reaches this.
+
+Leave `--my-slot` alone unless the map cannot answer for itself. It is a
+replay and debugging convenience, not a way to get ahead of the draft
+order: asserting a slot the map has not dealt does not seat you there,
+and the roster arithmetic behind it — open slots, needs, max bid — then
+describes a seat nobody has been given yet, quietly and with no banner.
+The default resolves the slot from the config's roster id against the
+live map, which is the number that will be true.
 
 Precedence: an explicit `--budget` beats a live `budget_<slot>` key,
 which beats the `[auction] budget` default. Operator input outranks
