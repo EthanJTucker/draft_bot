@@ -159,18 +159,81 @@ def test_config_budget_lever_still_moves_the_money_but_not_the_verdict(config):
     assert "--budget" in state["nomination"]["verdict_reason"]
 
 
-def _permuted_poller(config, rows, *, budgets=None):
+def _permuted_poller(config, rows, *, budgets=None, overrides=None):
     """The permuted board: my three keepers sit on DRAFT slot 4 and slot 7
     is an opponent. My slot is resolved from the config's roster id against
     the map, never passed in, exactly as live mode resolves it."""
     keepers = {MY_DRAFT_SLOT: ("K1", "K2", "K3")}
-    tracker = DraftTracker(config, keepers_by_slot=keepers, clock=lambda: 0.0)
+    tracker = DraftTracker(
+        config,
+        keepers_by_slot=keepers,
+        budget_overrides=overrides,
+        clock=lambda: 0.0,
+    )
     entries = [
         make_tick(
             nominee="B", offer=5, budgets=budgets, slot_to_roster_id=PERMUTED_SLOTS
         )
     ]
     return make_poller(config, entries, rows, keepers_by_slot=keepers, tracker=tracker)
+
+
+def _missed_banners(state):
+    """The standing banner for a --budget that never landed on my slot."""
+    return [
+        warning
+        for warning in state["settings_warnings"]
+        if warning["field"] == "budget_override_missed_my_slot"
+    ]
+
+
+def test_an_override_that_missed_my_slot_is_named_on_every_poll(config):
+    """The startup check, re-run against the LIVE board on every poll.
+
+    The CLI resolves my draft slot once, from the draft object it fetched
+    at startup. On draft night the dashboard comes up before the
+    commissioner assigns the order, so that lone check runs against the
+    placeholder slot map and cannot conclude anything — and a warning
+    printed into scrollback before the order landed is not where the
+    operator is looking anyway. So the same condition rides the board.
+
+    This is the mis-key it exists for: my roster id is 7, my draft slot is
+    4, and `--budget 7=96` funded an opponent. My own money is still the
+    league default, so the banner fires, names slot 4, and gives the flag
+    to type. Nothing downstream can detect this on its own: roster ids are
+    1-12 as well, and slot 7 now holds a perfectly plausible $96.
+
+    ANTI-CHEAT on both quiet cases, because a banner that fires on every
+    board is the wallpaper this whole issue is about. Keyed correctly, it
+    is silent. Given no override at all it is silent too — that board is
+    the ordinary un-entered one, already carrying the keeper_budgets
+    banner and a withheld verdict, and a second banner saying the same
+    thing would only crowd them."""
+    rows = _keeper_board_rows()
+
+    mis_keyed = _permuted_poller(config, rows, overrides={7: 96}).step()
+    assert mis_keyed["me"]["slot"] == MY_DRAFT_SLOT
+    assert mis_keyed["me"]["budget_is_default"] is True  # the money went elsewhere
+    assert team_by_slot(mis_keyed, 7)["remaining"] == 96
+    (missed,) = _missed_banners(mis_keyed)
+    assert "--budget 4=AMOUNT" in missed["expected"]
+    assert "slot 7" in missed["actual"]
+    # It must never tell me to key the slot my roster id happens to name.
+    assert "--budget 7=AMOUNT" not in missed["expected"] + missed["actual"]
+
+    keyed = _permuted_poller(config, rows, overrides={MY_DRAFT_SLOT: 96}).step()
+    assert keyed["me"]["remaining"] == 96
+    assert not _missed_banners(keyed)
+
+    # A real budget_<slot> key for my slot covers it just as well: the
+    # override landing elsewhere is then somebody else's problem, and the
+    # discard banner is what names it.
+    covered = _permuted_poller(
+        config, rows, budgets={MY_DRAFT_SLOT: 96}, overrides={7: 143}
+    ).step()
+    assert not _missed_banners(covered)
+
+    assert not _missed_banners(_permuted_poller(config, rows).step())
 
 
 def test_the_budget_rule_reads_my_draft_slot_and_not_the_roster_id(config):

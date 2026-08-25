@@ -490,6 +490,83 @@ def test_startup_echoes_the_overrides_and_shouts_when_they_miss_my_slot(tmp_path
     assert "MY draft slot" not in quiet.getvalue()
 
 
+IDENTITY_SLOTS = {slot: slot for slot in range(1, 13)}
+
+
+def test_startup_draws_no_conclusion_while_the_draft_order_is_a_placeholder(tmp_path):
+    """The launch sequence draft night will actually use.
+
+    The dashboard comes up BEFORE the commissioner assigns the draft
+    order, so the draft sits in pre_draft carrying the placeholder map
+    (slot N = roster N) that this league permutes the moment the order
+    lands. Startup resolves my slot from that map exactly once, which
+    means it is drawing conclusions from a number about to change. Both
+    directions were wrong:
+
+    * `--budget 7=96`, keyed to my ROSTER id, matches the placeholder, so
+      the guard printed a clean bill and the operator learned nothing —
+      and once the order landed, slot 7 was an opponent.
+    * `--budget 4=96`, the CORRECT figure for my eventual draft slot,
+      tripped the guard, which told him to pass `--budget 7=AMOUNT`
+      instead: to move his real money onto that same opponent's row.
+
+    A tool that instructs the wrong action is worse than one that says
+    nothing, so on a placeholder map neither line is printed. Startup
+    says the order is not assigned yet and stops; the live board carries
+    the check from there.
+    """
+    for flag in ("7=96", "4=96"):
+        out = io.StringIO()
+
+        code = main(
+            _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", flag),
+            server=CapturingServer(),
+            out=out,
+            http_get=_live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS),
+        )
+
+        assert code == 0
+        printed = out.getvalue()
+        assert f"budget overrides parsed (DRAFT slots): slot {flag[0]} = $96" in printed
+        assert "order is not assigned yet" in printed
+        # No verdict on the flag, in EITHER direction: no all-clear, and
+        # above all no instruction to re-key it against the placeholder.
+        assert "MY draft slot" not in printed
+        assert "AMOUNT instead" not in printed
+
+
+def test_an_explicit_my_slot_is_checked_even_before_the_order_lands(tmp_path):
+    """ANTI-CHEAT on the placeholder caveat: it is about the MAP, not
+    about the status.
+
+    `--my-slot 4` is the operator stating his slot himself, so resolving
+    it never touches the slot map and a pre_draft draft cannot make it
+    stale. The check must still run here and still catch `--budget 7=96`.
+    A fix that keys the caveat on `status == "pre_draft"` alone goes quiet
+    on this board and fails."""
+    out = io.StringIO()
+
+    code = main(
+        _live_args(
+            tmp_path,
+            _keeper_sheet(tmp_path),
+            "--my-slot",
+            "4",
+            "--budget",
+            "7=96",
+        ),
+        server=CapturingServer(),
+        out=out,
+        http_get=_live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS),
+    )
+
+    assert code == 0
+    printed = out.getvalue()
+    assert "order is not assigned yet" not in printed
+    assert "MY draft slot (4)" in printed
+    assert "--budget 4=AMOUNT" in printed
+
+
 def test_a_mis_keyed_override_is_named_in_a_banner_once_sleeper_carries_keys(tmp_path):
     """The quiet case the precedence flip creates, and its remaining tell.
 

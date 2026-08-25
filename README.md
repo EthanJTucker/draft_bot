@@ -253,6 +253,16 @@ startup echoes every override it parsed. If overrides are given while my
 own resolved slot still has real money from neither source, startup says
 so and names the slot to use.
 
+That check needs the order to exist. Launch before the commissioner deals
+it — the likely case, since the order is assigned at draft time — and the
+draft still carries the placeholder map, slot N = roster N. Startup then
+says only that, because both of its answers would be wrong on a
+placeholder: a flag keyed to my roster id matches it and gets a clean
+bill, and the correct flag for my eventual slot gets told to re-key
+itself onto an opponent's row. The page carries the check from there. My
+slot is re-resolved every poll, and a standing banner names the flag to
+type whenever overrides were given and my own money is still the default.
+
 Precedence: an explicit `--budget` beats a live `budget_<slot>` key,
 which beats the `[auction] budget` default. Operator input outranks
 remote data because the case this lever exists for is a commissioner who

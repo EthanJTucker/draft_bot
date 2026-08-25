@@ -230,14 +230,7 @@ class DashboardPoller:
             "status": board.status,
             "paused": board.paused,
             "stale_endpoints": sorted(board.stale_endpoints),
-            "settings_warnings": [
-                {
-                    "field": warning.field,
-                    "expected": str(warning.expected),
-                    "actual": str(warning.actual),
-                }
-                for warning in board.settings_warnings
-            ],
+            "settings_warnings": self._settings_warnings(board, my_slot),
             "timer_end_at": board.timer_end_at,
             "nomination": self._nomination_json(board, my_slot),
             "teams": [self._team_json(team, my_slot) for team in board.teams],
@@ -247,6 +240,63 @@ class DashboardPoller:
             "sales": [self._sale_json(sale) for sale in board.sales],
             "off_model_player_ids": list(board.off_model_player_ids),
             "note": self._note,
+        }
+
+    def _settings_warnings(self, board: BoardState, my_slot: int | None) -> list[dict]:
+        """The tracker's standing banners, plus the one only this layer
+        can raise: a ``--budget`` that never landed on my slot."""
+        warnings = [
+            {
+                "field": warning.field,
+                "expected": str(warning.expected),
+                "actual": str(warning.actual),
+            }
+            for warning in board.settings_warnings
+        ]
+        missed = self._override_missed_my_slot(board, my_slot)
+        if missed is not None:
+            warnings.append(missed)
+        return warnings
+
+    def _override_missed_my_slot(
+        self, board: BoardState, my_slot: int | None
+    ) -> dict | None:
+        """The startup ``--budget`` check, re-run against the LIVE board.
+
+        The CLI runs that check once, against the draft object it fetched
+        at startup. On draft night the dashboard comes up before the
+        commissioner assigns the draft order, so that one check reads a
+        placeholder slot map and can conclude nothing — and a line
+        printed into scrollback before the order landed is not where the
+        operator is looking anyway. My slot is re-resolved every poll, so
+        the same condition rides the board and reaches the page.
+
+        Quiet unless an override was given AND my own slot still shows
+        the league-wide default: keyed correctly it never fires, and with
+        no override at all it never fires either. That board is the
+        ordinary un-entered one, which already carries the keeper_budgets
+        banner and a withheld verdict naming the flag; a second banner
+        repeating them would only crowd the screen.
+        """
+        overrides = self._tracker.budget_overrides
+        if not overrides or my_slot is None:
+            return None
+        if not board.team(my_slot).budget_is_default:
+            return None
+        named = ", ".join(f"slot {slot}" for slot in sorted(overrides))
+        return {
+            "field": "budget_override_missed_my_slot",
+            "expected": (
+                f"--budget {my_slot}=AMOUNT — {my_slot} is MY draft slot, "
+                f"and roster id {self._config.my_roster_id} is a different "
+                "number"
+            ),
+            "actual": (
+                f"--budget named {named}; my own money is still the "
+                f"${self._config.auction_budget} league default, so if one "
+                "of those was meant to be mine it is keyed by the wrong "
+                "identifier and belongs to somebody else"
+            ),
         }
 
     def _resolve_my_slot(self, board: BoardState) -> int | None:

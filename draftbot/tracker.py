@@ -256,6 +256,18 @@ class DraftTracker:
         self._observed_sales = 0
         self._last_sale_at: float | None = None
 
+    @property
+    def budget_overrides(self) -> Mapping[int, int]:
+        """The hand-keyed ``--budget`` figures by DRAFT slot, read-only.
+
+        Exposed because the render layer has to be able to say "an
+        override was given and none of it landed on my slot" on every
+        poll, and it is the layer that knows which slot is mine. Handing
+        it a second copy of the same mapping is exactly how the two would
+        drift apart.
+        """
+        return MappingProxyType(self._budget_overrides)
+
     def update(self, tick: SourceTick) -> BoardState:
         """Fold one observation of the draft into a fresh board."""
         if len(tick.picks) > self._observed_sales:

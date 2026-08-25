@@ -384,6 +384,9 @@ def main(
         draft,
         config,
         my_slot=_resolve_my_draft_slot(draft, config, args.my_slot),
+        # A slot read off a map that has not been dealt yet is not a
+        # fact about this draft. An explicit --my-slot never reads it.
+        provisional=args.my_slot is None and _slot_map_is_provisional(draft),
         stream=stream,
         err=err,
     )
@@ -411,12 +414,34 @@ def _resolve_my_draft_slot(
     return None
 
 
+def _slot_map_is_provisional(draft: DraftState) -> bool:
+    """Whether this draft's slot-to-roster map is still the placeholder.
+
+    Sleeper seats a draft that has not been ordered yet at the identity
+    (slot N holds roster N) and permutes it when the commissioner assigns
+    the order — at or near draft start, and after the operator has
+    already launched the dashboard. Reading "my slot" off that map gives
+    a number that is about to change, so anything concluded from it is
+    provisional too.
+
+    Both halves are required. A pre_draft draft whose order HAS been
+    dealt carries a real permutation and is checkable; keying on the
+    status alone would go quiet on exactly the board the check works on.
+    An empty map reads as provisional here and never gets this far — it
+    resolves to no slot at all, which has its own message.
+    """
+    return draft.status == "pre_draft" and all(
+        slot == roster_id for slot, roster_id in draft.slot_to_roster_id.items()
+    )
+
+
 def _report_budget_overrides(
     overrides: Mapping[int, int],
     draft: DraftState,
     config: LeagueConfig,
     *,
     my_slot: int | None,
+    provisional: bool,
     stream: TextIO,
     err: TextIO,
 ) -> None:
@@ -434,11 +459,33 @@ def _report_budget_overrides(
     loud warning whenever an override was supplied while my own resolved
     slot still has real money from neither source — which is the exact
     signature of that confusion.
+
+    Except on a provisional map, where the check has nothing to stand on
+    and BOTH of its answers are wrong: a flag keyed to my roster id
+    matches the placeholder and gets a clean bill, while the correct flag
+    for my eventual slot gets told to re-key itself onto the slot my
+    roster id happens to name — an opponent's row, once the order lands.
+    Instructing the wrong action is worse than saying nothing, so this
+    says only that the order is not dealt yet. The poller re-resolves my
+    slot every tick and puts the same condition on the page as a standing
+    banner, which is where it can still be acted on.
     """
     if not overrides:
         return
     pairs = ", ".join(f"slot {slot} = ${overrides[slot]}" for slot in sorted(overrides))
     print(f"dashboard: budget overrides parsed (DRAFT slots): {pairs}", file=stream)
+    if provisional:
+        print(
+            "warning: --budget was given, but this draft's order is not "
+            "assigned yet — it sits in pre_draft still carrying the "
+            "placeholder map (slot N = roster N), which this league "
+            "permutes when the order is dealt. Which DRAFT slot is mine "
+            "can still change, so nothing above is checked against it "
+            "here. The page re-resolves my slot every poll and raises a "
+            "standing banner if none of the above turns out to be mine",
+            file=err,
+        )
+        return
     if my_slot is None:
         print(
             "warning: --budget was given, but this draft seats no slot for "
