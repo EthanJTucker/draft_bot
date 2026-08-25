@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from draftbot.config import LeagueConfig
 from draftbot.draft_engine import PlayerAnalysis, analyze_player
+from draftbot.models import slot_map_is_provisional
 from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.sources import SourceTick
 from draftbot.tracker import (
@@ -277,13 +278,25 @@ class DashboardPoller:
         ordinary un-entered one, which already carries the keeper_budgets
         banner and a withheld verdict naming the flag; a second banner
         repeating them would only crowd the screen.
+
+        Before the order is dealt this cannot rule at all, and BOTH of
+        its answers would be wrong — the same reason the CLI refuses, on
+        the same shared predicate. So that window gets the placeholder
+        banner instead, which names no flag to type.
         """
         overrides = self._tracker.budget_overrides
-        if not overrides or my_slot is None:
-            return None
-        if not board.team(my_slot).budget_is_default:
+        if not overrides:
             return None
         named = ", ".join(f"slot {slot}" for slot in sorted(overrides))
+        if self._my_slot is None and slot_map_is_provisional(
+            board.status, ((team.slot, team.roster_id) for team in board.teams)
+        ):
+            # An explicit --my-slot is exempt (mirroring the CLI): that
+            # number came from the operator, not from the map, so an
+            # undealt order cannot make it stale.
+            return self._order_not_dealt(named)
+        if my_slot is None or not board.team(my_slot).budget_is_default:
+            return None
         return {
             "field": "budget_override_missed_my_slot",
             "expected": (
@@ -296,6 +309,36 @@ class DashboardPoller:
                 f"${self._config.auction_budget} league default, so if one "
                 "of those was meant to be mine it is keyed by the wrong "
                 "identifier and belongs to somebody else"
+            ),
+        }
+
+    def _order_not_dealt(self, named: str) -> dict:
+        """The placeholder banner: --budget was given, and this board
+        cannot say anything about it yet.
+
+        Deliberately NOT a clean bill and deliberately NOT an
+        instruction. A mis-key to my roster id matches the placeholder,
+        so every provenance signal on this board reads correct and
+        silence would amount to asserting the flag landed — on a board
+        where that is unknowable. The correct flag for my eventual slot
+        looks wrong here for the same reason. One sentence is true of
+        both: the order is not dealt, so nothing is checked. It names no
+        slot to re-key by, and it clears itself the moment the order
+        lands, when the real check takes over.
+        """
+        return {
+            "field": "budget_order_not_dealt",
+            "expected": (
+                "the draft order dealt, so --budget can be checked "
+                "against MY draft slot"
+            ),
+            "actual": (
+                f"--budget named {named}, but this draft is still in "
+                "pre_draft carrying the placeholder map (slot N = roster "
+                "N), which this league permutes when the order is dealt. "
+                "Which DRAFT slot is mine can still change, so none of "
+                "the above is checked against it and the money shown for "
+                "those slots is not confirmed to be on the right rows"
             ),
         }
 

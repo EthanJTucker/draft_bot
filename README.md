@@ -259,9 +259,17 @@ draft still carries the placeholder map, slot N = roster N. Startup then
 says only that, because both of its answers would be wrong on a
 placeholder: a flag keyed to my roster id matches it and gets a clean
 bill, and the correct flag for my eventual slot gets told to re-key
-itself onto an opponent's row. The page carries the check from there. My
-slot is re-resolved every poll, and a standing banner names the flag to
-type whenever overrides were given and my own money is still the default.
+itself onto an opponent's row. The page applies the same test, from the
+same shared predicate, so it cannot give on a standing banner either of
+the two answers startup refuses to print. While the map is still the
+placeholder the page raises a banner that names no flag at all: the order
+is not dealt, so none of the overrides is checked. That is not a clean
+bill, and it clears itself the moment the order lands. From there the
+full check takes over: my slot is re-resolved every poll, and a standing
+banner names the flag to type whenever overrides were given and my own
+money is still the default. An explicit `--my-slot` is exempt from the
+placeholder rule on both surfaces, because that number came from me and
+not from the map.
 
 Precedence: an explicit `--budget` beats a live `budget_<slot>` key,
 which beats the `[auction] budget` default. Operator input outranks

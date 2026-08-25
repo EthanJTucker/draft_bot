@@ -30,7 +30,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from draftbot.config import LeagueConfig, load_config
 from draftbot.dashboard.sheets import read_sheet_csv, replay_sheet
 from draftbot.dashboard.state import DashboardPoller
-from draftbot.models import DraftState, parse_draft
+from draftbot.models import DraftState, parse_draft, slot_map_is_provisional
 from draftbot.sleeper_client import SleeperClient, SleeperUnavailableError
 from draftbot.sources import LivePollSource, ReplaySource
 from draftbot.tracker import (
@@ -386,7 +386,10 @@ def main(
         my_slot=_resolve_my_draft_slot(draft, config, args.my_slot),
         # A slot read off a map that has not been dealt yet is not a
         # fact about this draft. An explicit --my-slot never reads it.
-        provisional=args.my_slot is None and _slot_map_is_provisional(draft),
+        # The SAME predicate rides every poll (state.py); one board must
+        # not get one answer here and the opposite one on the page.
+        provisional=args.my_slot is None
+        and slot_map_is_provisional(draft.status, draft.slot_to_roster_id.items()),
         stream=stream,
         err=err,
     )
@@ -412,27 +415,6 @@ def _resolve_my_draft_slot(
         if roster_id == config.my_roster_id:
             return slot
     return None
-
-
-def _slot_map_is_provisional(draft: DraftState) -> bool:
-    """Whether this draft's slot-to-roster map is still the placeholder.
-
-    Sleeper seats a draft that has not been ordered yet at the identity
-    (slot N holds roster N) and permutes it when the commissioner assigns
-    the order — at or near draft start, and after the operator has
-    already launched the dashboard. Reading "my slot" off that map gives
-    a number that is about to change, so anything concluded from it is
-    provisional too.
-
-    Both halves are required. A pre_draft draft whose order HAS been
-    dealt carries a real permutation and is checkable; keying on the
-    status alone would go quiet on exactly the board the check works on.
-    An empty map reads as provisional here and never gets this far — it
-    resolves to no slot at all, which has its own message.
-    """
-    return draft.status == "pre_draft" and all(
-        slot == roster_id for slot, roster_id in draft.slot_to_roster_id.items()
-    )
 
 
 def _report_budget_overrides(
@@ -466,8 +448,10 @@ def _report_budget_overrides(
     for my eventual slot gets told to re-key itself onto the slot my
     roster id happens to name — an opponent's row, once the order lands.
     Instructing the wrong action is worse than saying nothing, so this
-    says only that the order is not dealt yet. The poller re-resolves my
-    slot every tick and puts the same condition on the page as a standing
+    says only that the order is not dealt yet — and so does the page,
+    which shares this module's placeholder predicate rather than owning a
+    second copy of it. Once the order lands the poller re-resolves my
+    slot every tick and puts the full condition on the page as a standing
     banner, which is where it can still be acted on.
     """
     if not overrides:
@@ -481,8 +465,9 @@ def _report_budget_overrides(
             "placeholder map (slot N = roster N), which this league "
             "permutes when the order is dealt. Which DRAFT slot is mine "
             "can still change, so nothing above is checked against it "
-            "here. The page re-resolves my slot every poll and raises a "
-            "standing banner if none of the above turns out to be mine",
+            "here. The page says the same until the order lands, then "
+            "re-resolves my slot every poll and raises a standing banner "
+            "if none of the above turns out to be mine",
             file=err,
         )
         return

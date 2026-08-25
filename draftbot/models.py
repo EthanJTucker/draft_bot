@@ -8,9 +8,41 @@ as a STRING in ``metadata.amount``, purchases attribute by ``draft_slot``
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
+
+# Sleeper's status for a draft that has not started yet.
+PRE_DRAFT_STATUS = "pre_draft"
+
+
+def slot_map_is_provisional(
+    status: str, slot_pairs: Iterable[tuple[int, int | None]]
+) -> bool:
+    """Whether a draft's slot-to-roster map is still the placeholder.
+
+    Sleeper seats a draft that has not been ordered yet at the identity
+    (slot N holds roster N) and permutes it when the commissioner assigns
+    the order — at or near draft start, and after the operator has
+    already launched the dashboard. Reading "my slot" off that map gives
+    a number that is about to change, so anything concluded from it is
+    provisional too.
+
+    Both halves are required. A pre_draft draft whose order HAS been
+    dealt carries a real permutation and is checkable; keying on the
+    status alone would go quiet on exactly the board the check works on.
+    An unseated slot (no roster id at all) reads as provisional, matching
+    the empty map: nobody has been dealt a seat there either.
+
+    Takes the two facts rather than a draft object because the two
+    surfaces that ask this question hold different types — the CLI a
+    parsed :class:`DraftState`, the poller a tracked board. Writing the
+    rule twice is exactly how the startup check and the standing page
+    banner came to give opposite answers on the same board.
+    """
+    return status == PRE_DRAFT_STATUS and all(
+        roster_id is None or slot == roster_id for slot, roster_id in slot_pairs
+    )
 
 
 @dataclass(frozen=True)

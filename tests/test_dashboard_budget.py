@@ -178,13 +178,25 @@ def _permuted_poller(config, rows, *, budgets=None, overrides=None):
     return make_poller(config, entries, rows, keepers_by_slot=keepers, tracker=tracker)
 
 
+def _banners(state, field):
+    """Every standing settings banner carrying ``field``."""
+    return [
+        warning for warning in state["settings_warnings"] if warning["field"] == field
+    ]
+
+
 def _missed_banners(state):
     """The standing banner for a --budget that never landed on my slot."""
-    return [
-        warning
+    return _banners(state, "budget_override_missed_my_slot")
+
+
+def _banner_text(state):
+    """Every word the page would paint from this board's settings banners,
+    so a test can assert that a string appears in NONE of them."""
+    return " ".join(
+        warning["field"] + warning["expected"] + warning["actual"]
         for warning in state["settings_warnings"]
-        if warning["field"] == "budget_override_missed_my_slot"
-    ]
+    )
 
 
 def test_an_override_that_missed_my_slot_is_named_on_every_poll(config):
@@ -234,6 +246,119 @@ def test_an_override_that_missed_my_slot_is_named_on_every_poll(config):
     assert not _missed_banners(covered)
 
     assert not _missed_banners(_permuted_poller(config, rows).step())
+
+
+# The placeholder seats roster 7 at draft slot 7, so the keeper lists the
+# rosters produce hang there until the order is dealt and moves them to 4.
+PLACEHOLDER_SEAT = 7
+
+
+def _pre_order_poller(config, rows, *, overrides=None, my_slot=None, slots=None):
+    """The launch the README calls the likely one: the dashboard comes up
+    BEFORE the commissioner deals the draft order, so the draft sits in
+    pre_draft still carrying the placeholder map (slot N = roster N).
+
+    ``slots`` replaces that map with a dealt one, for the anti-cheat board
+    that is still pre_draft but whose order HAS landed. Keepers follow the
+    map in force, exactly as ``keepers_by_slot_from_rosters`` builds them.
+    """
+    keepers = {MY_DRAFT_SLOT if slots else PLACEHOLDER_SEAT: ("K1", "K2", "K3")}
+    tracker = DraftTracker(
+        config,
+        keepers_by_slot=keepers,
+        budget_overrides=overrides,
+        clock=lambda: 0.0,
+    )
+    entries = [make_tick(status="pre_draft", slot_to_roster_id=slots)]
+    return make_poller(
+        config, entries, rows, keepers_by_slot=keepers, tracker=tracker, my_slot=my_slot
+    )
+
+
+def test_no_budget_flag_is_judged_before_the_draft_order_is_dealt(config):
+    """The startup guard's other half, on the surface the operator reads.
+
+    Startup refuses to rule on --budget against a placeholder map because
+    BOTH of its answers are wrong there. The page re-runs the same check
+    every poll, on the same placeholder, and must refuse for the same
+    reason — otherwise the instruction the CLI stopped printing simply
+    moved onto a standing amber banner and got louder.
+
+    ANTI-CHEAT in both directions, which is what the poller layer never
+    had: every other board in this module carries a dealt order.
+
+    * `--budget 4=96` is CORRECT for my eventual slot. Read off the
+      placeholder my slot resolves to 7, my slot-7 money is the default,
+      and the shipped guard fires — telling the operator to move his real
+      money onto what becomes an opponent's row, in a sentence that
+      prints 7 and 7 while asserting the two numbers differ.
+    * `--budget 7=96` is the mis-key this whole guard exists to catch. It
+      matches the placeholder, so the money lands and every provenance
+      test reads clean. Going merely quiet here would be a clean bill on
+      a board where the answer is unknowable, so the same banner fires
+      and says only what is true: the order is not dealt.
+
+    Silence is therefore wrong on BOTH boards, and each of the two
+    trivially-wrong implementations (keep the old check; return nothing
+    on a placeholder) fails one of them.
+    """
+    rows = _keeper_board_rows()
+
+    correct = _pre_order_poller(config, rows, overrides={MY_DRAFT_SLOT: 96}).step()
+    assert not _missed_banners(correct)
+    # The instruction the CLI stopped printing must not reappear here.
+    assert "--budget 7=AMOUNT" not in _banner_text(correct)
+    assert "AMOUNT" not in _banner_text(correct)
+    (undealt,) = _banners(correct, "budget_order_not_dealt")
+    assert "slot 4" in undealt["actual"]
+    assert "placeholder" in undealt["actual"]
+
+    mis_keyed = _pre_order_poller(config, rows, overrides={PLACEHOLDER_SEAT: 96}).step()
+    # The money DID land on the placeholder seat, which is exactly why
+    # every provenance signal reads clean and a clean bill is tempting.
+    assert mis_keyed["me"]["slot"] == PLACEHOLDER_SEAT
+    assert mis_keyed["me"]["remaining"] == 96
+    assert mis_keyed["me"]["budget_is_default"] is False
+    assert not _missed_banners(mis_keyed)
+    (undealt_mis,) = _banners(mis_keyed, "budget_order_not_dealt")
+    assert "slot 7" in undealt_mis["actual"]
+    assert "AMOUNT" not in _banner_text(mis_keyed)
+
+    # Quiet without --budget: nothing was given, so nothing is unchecked.
+    quiet = _pre_order_poller(config, rows).step()
+    assert not _banners(quiet, "budget_order_not_dealt")
+    assert not _missed_banners(quiet)
+
+
+def test_the_page_guard_reads_the_slot_map_and_not_merely_the_status(config):
+    """ANTI-CHEAT on the placeholder guard's two halves, the pair that
+    keeps it from swallowing the warning it was added to protect.
+
+    A guard keyed on `status == "pre_draft"` alone goes quiet on the first
+    board here, where the order HAS been dealt and the mis-key is real and
+    checkable. A guard that ignores an explicit --my-slot goes quiet on
+    the second, where my slot came from the operator rather than from the
+    map and an undealt order cannot make it stale — the same carve-out
+    the startup check makes.
+    """
+    rows = _keeper_board_rows()
+
+    dealt = _pre_order_poller(
+        config, rows, overrides={PLACEHOLDER_SEAT: 96}, slots=PERMUTED_SLOTS
+    ).step()
+    assert dealt["status"] == "pre_draft"
+    (missed,) = _missed_banners(dealt)
+    assert "--budget 4=AMOUNT" in missed["expected"]
+    assert "--budget 7=AMOUNT" not in missed["expected"] + missed["actual"]
+    assert not _banners(dealt, "budget_order_not_dealt")
+
+    told = _pre_order_poller(
+        config, rows, overrides={PLACEHOLDER_SEAT: 96}, my_slot=MY_DRAFT_SLOT
+    ).step()
+    assert told["me"]["slot"] == MY_DRAFT_SLOT
+    (missed_told,) = _missed_banners(told)
+    assert "--budget 4=AMOUNT" in missed_told["expected"]
+    assert not _banners(told, "budget_order_not_dealt")
 
 
 def test_the_budget_rule_reads_my_draft_slot_and_not_the_roster_id(config):
