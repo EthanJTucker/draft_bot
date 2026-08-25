@@ -153,16 +153,92 @@ def test_keeper_budget_banner_counts_an_override_as_covered(config):
     assert not [w for w in all_covered.settings_warnings if w.field == "keeper_budgets"]
 
 
-def test_sleeper_budget_key_outranks_a_manual_override(config):
-    """Precedence, pinned: once the commissioner enters budget_<slot> the
-    live draft object is authoritative and a stale hand-keyed override
-    for the same slot is ignored. Reversing the precedence reads $96 here."""
+def test_a_manual_override_outranks_a_sleeper_budget_key(config):
+    """Precedence, pinned — and DELIBERATELY REVERSED from what this test
+    asserted when it was first written.
+
+    It used to pin Sleeper-first: a live budget_<slot> key beat a
+    hand-keyed override, on the reasoning that server data is fresher
+    than a number typed at the command line. That reasoning does not
+    survive the case the lever exists for. A commissioner who enters the
+    flat league budget for twelve keeper teams produces twelve real keys
+    carrying fiction: nothing is flagged, budget_is_default reads False
+    everywhere, and under Sleeper-first the operator's override is
+    discarded silently, leaving him no lever at all. The recoverable
+    direction is the other one — a stale override costs a few dollars on
+    one team and the operator can drop the flag.
+
+    So: explicit operator input, then the remote value, then the default.
+    $96 here, not $143. The discard raises its own banner (pinned in
+    test_an_override_that_discards_a_real_budget_says_so), so trading the
+    invisible remote failure for an invisible local one is ruled out."""
     tracker = DraftTracker(config, budget_overrides={5: 96})
     board = tracker.update(_tick(settings={"budget_5": 143}))
 
     team = board.team(5)
-    assert team.budget == 143
+    assert team.budget == 96
     assert team.budget_is_default is False
+    # The untouched slots still read the key Sleeper carries for them.
+    assert tracker.update(_tick(settings={"budget_4": 143})).team(4).budget == 143
+
+
+def test_an_override_that_discards_a_real_budget_says_so(config):
+    """The condition attached to the precedence flip. Filling a hole and
+    discarding real server data are different acts, and the operator has
+    to be able to tell them apart, so only the second raises a banner —
+    named by slot, carrying BOTH amounts so he can see what he replaced.
+
+    Anti-cheat: the equal case is not a discard. An override that agrees
+    with the key Sleeper carries changes nothing, and a banner there
+    would be noise the operator learns to ignore."""
+    keyed = DraftTracker(config, budget_overrides={5: 96}).update(
+        _tick(settings={"budget_5": 143})
+    )
+    (warning,) = [w for w in keyed.settings_warnings if w.field == "budget_override"]
+    assert "slot 5 = $96" in str(warning.expected)
+    assert "slot 5 = $143" in str(warning.actual)
+
+    hole = DraftTracker(config, budget_overrides={5: 96}).update(_tick())
+    assert not [w for w in hole.settings_warnings if w.field == "budget_override"]
+
+    agrees = DraftTracker(config, budget_overrides={5: 143}).update(
+        _tick(settings={"budget_5": 143})
+    )
+    assert not [w for w in agrees.settings_warnings if w.field == "budget_override"]
+
+
+def test_an_override_a_keeper_roster_cannot_afford_raises_a_banner(config):
+    """`--budget 5=200` on a slot holding three keepers is not merely
+    unverified, it is provably impossible: keeper cost is bounded below
+    by the $5 floor, so three keepers leave at most $185 of post-keeper
+    money. Left unflagged it is the pre-fix wrong number ($200 where the
+    truth is at most $185) wearing the fix's all-clear — the banner it
+    would otherwise have raised is silenced by the override.
+
+    Anti-cheat on both boundaries: $185 is exactly reachable and must
+    stay quiet, and a keeper-free slot has no ceiling to breach at all,
+    so $200 there is unverified rather than wrong."""
+    keepers = {5: ("K1", "K2", "K3")}
+    over = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 200}
+    ).update(_tick())
+    (warning,) = [
+        w for w in over.settings_warnings if w.field == "budget_override_ceiling"
+    ]
+    assert "slot 5 = $200" in str(warning.actual)
+    assert "$185" in str(warning.actual)
+
+    exact = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 185}
+    ).update(_tick())
+    assert not [
+        w for w in exact.settings_warnings if w.field == "budget_override_ceiling"
+    ]
+
+    keeper_free = DraftTracker(config, budget_overrides={5: 200}).update(_tick())
+    assert not [
+        w for w in keeper_free.settings_warnings if w.field == "budget_override_ceiling"
+    ]
 
 
 def test_nominee_in_the_sold_set_never_renders_live(config):
