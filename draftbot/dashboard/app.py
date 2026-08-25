@@ -30,7 +30,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from draftbot.config import LeagueConfig, load_config
 from draftbot.dashboard.sheets import read_sheet_csv, replay_sheet
 from draftbot.dashboard.state import DashboardPoller
-from draftbot.models import parse_draft
+from draftbot.models import DraftState, parse_draft
 from draftbot.sleeper_client import SleeperClient, SleeperUnavailableError
 from draftbot.sources import LivePollSource, ReplaySource
 from draftbot.tracker import (
@@ -141,9 +141,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         metavar="SLOT=AMOUNT",
         help="a team's REAL auction budget, keyed by hand from the league "
-        "sheet when the commissioner never entered budget_<slot> on "
-        "Sleeper (repeatable: --budget 7=96 --budget 3=143). Sleeper "
-        "wins where it carries a budget; a slot with neither shows the "
+        "sheet (repeatable: --budget 4=96 --budget 11=143). SLOT is the "
+        "DRAFT slot, which is NOT the roster id — this league assigns "
+        "draft order at draft time and the two numbers differ; the page's "
+        "My-team panel names my draft slot. An explicit --budget outranks "
+        "Sleeper's own budget_<slot> key, and replacing a real key is "
+        "named in the settings banner. A slot with neither shows the "
         "league default, is marked on the page, and withholds my verdict",
     )
     parser.add_argument(
@@ -173,13 +176,18 @@ def _parse_budget_overrides(
     """``--budget SLOT=AMOUNT`` occurrences as {slot: amount}, or None
     after printing why one of them is unusable.
 
+    SLOT is the DRAFT slot, not the roster id; the two are different
+    identifiers in this league. Nothing here can catch that confusion —
+    roster ids are 1-12 as well — which is why startup echoes what
+    parsed and shouts when my own slot is not among it.
+
     Every rejection is loud. A flag the operator believes he set but
     which quietly failed to parse leaves exactly the wrong number this
     whole lever exists to remove, so a malformed token stops startup
-    instead of being skipped. AMOUNT is a whole-draft budget, the same
-    quantity Sleeper's ``budget_<slot>`` carries and the same one the
-    config's ``[auction] budget`` supplies as a fallback — not a
-    remaining balance and not a per-bid cap.
+    instead of being skipped. AMOUNT is the team's post-keeper money for
+    the WHOLE draft — the same quantity Sleeper's ``budget_<slot>``
+    carries and the same one the config's ``[auction] budget`` supplies
+    as a fallback. It is not a running balance and not a per-bid cap.
     """
     overrides: dict[int, int] = {}
     for raw in values or ():
@@ -187,7 +195,7 @@ def _parse_budget_overrides(
         if not separator or not slot_text or not amount_text:
             print(
                 f"error: --budget {raw!r} is not SLOT=AMOUNT "
-                "(for example: --budget 7=96)",
+                "(for example: --budget 4=96)",
                 file=err,
             )
             return None
@@ -196,14 +204,14 @@ def _parse_budget_overrides(
         except ValueError:
             print(
                 f"error: --budget {raw!r} needs whole numbers on both "
-                "sides (for example: --budget 7=96)",
+                "sides (for example: --budget 4=96)",
                 file=err,
             )
             return None
         if not 1 <= slot <= config.teams:
             print(
                 f"error: --budget {raw!r} names slot {slot}, outside this "
-                f"league's draft slots (1-{config.teams})",
+                f"league's DRAFT slots (1-{config.teams})",
                 file=err,
             )
             return None
@@ -235,19 +243,21 @@ def _read_sheet_or_none(path: str, err: TextIO):
 
 
 def _replay_runtime(args: argparse.Namespace, err: TextIO):
-    """(source, rows, empty keepers) for replay mode, or None after
+    """(source, rows, empty keepers, draft) for replay mode, or None after
     printing why. The 2025 fixture carries zero keepers, so the empty
-    keeper mapping is the truth, not a shortcut."""
+    keeper mapping is the truth, not a shortcut. The parsed draft rides
+    along so startup can check ``--budget`` against the real slot map."""
     try:
         data = json.loads(Path(args.replay).read_text(encoding="utf-8"))
         source = ReplaySource(data["draft"], data["picks"])
+        draft = parse_draft(data["draft"])
     except (OSError, ValueError, KeyError) as error:
         print(f"error: cannot load replay fixture {args.replay}: {error}", file=err)
         return None
     if args.sheet is None:
-        return source, replay_sheet(data["picks"]), {}
+        return source, replay_sheet(data["picks"]), {}, draft
     rows = _read_sheet_or_none(args.sheet, err)
-    return None if rows is None else (source, rows, {})
+    return None if rows is None else (source, rows, {}, draft)
 
 
 def _build_runtime(
@@ -256,9 +266,12 @@ def _build_runtime(
     err: TextIO,
     http_get=None,
 ):
-    """(source, rows, keepers_by_slot) for the chosen mode, or None after
-    printing why. Live mode touches the network exactly once here (draft
-    + rosters, for the keeper lists the picks feed never carries)."""
+    """(source, rows, keepers_by_slot, draft) for the chosen mode, or None
+    after printing why. Live mode touches the network exactly once here
+    (draft + rosters, for the keeper lists the picks feed never carries).
+    The draft object is returned rather than dropped: it carries the
+    slot-to-roster map and the ``budget_<slot>`` keys, which is what makes
+    the startup check on ``--budget`` possible before the first poll."""
     if args.replay is not None:
         return _replay_runtime(args, err)
     if args.sheet is None:
@@ -289,7 +302,7 @@ def _build_runtime(
             file=err,
         )
         return None
-    return LivePollSource(client), rows, keepers
+    return LivePollSource(client), rows, keepers, draft
 
 
 def _keepers_missing(args: argparse.Namespace, config: LeagueConfig, keepers) -> bool:
@@ -365,9 +378,86 @@ def main(
         "Ctrl-C stops",
         file=stream,
     )
+    draft = runtime[3]
+    _report_budget_overrides(
+        budget_overrides,
+        draft,
+        config,
+        my_slot=_resolve_my_draft_slot(draft, config, args.my_slot),
+        stream=stream,
+        err=err,
+    )
     run = _serve if server is None else server
     run(app, poller, host=args.host, port=args.port, interval=interval)
     return 0
+
+
+def _resolve_my_draft_slot(
+    draft: DraftState, config: LeagueConfig, my_slot: int | None
+) -> int | None:
+    """My DRAFT slot: the explicit ``--my-slot`` if given, else the slot
+    the draft seats my roster id in.
+
+    Slot and roster id are different identifiers and this league permutes
+    them when it assigns the draft order, so this may NEVER shortcut to
+    ``config.my_roster_id``. A draft that seats no such roster id (the map
+    is not populated yet) honestly returns None.
+    """
+    if my_slot is not None:
+        return my_slot
+    for slot, roster_id in sorted(draft.slot_to_roster_id.items()):
+        if roster_id == config.my_roster_id:
+            return slot
+    return None
+
+
+def _report_budget_overrides(
+    overrides: Mapping[int, int],
+    draft: DraftState,
+    config: LeagueConfig,
+    *,
+    my_slot: int | None,
+    stream: TextIO,
+    err: TextIO,
+) -> None:
+    # pylint: disable=too-many-arguments  # one parameter per fact the
+    # check reads; bundling them would only hide the count.
+    """Echo what ``--budget`` actually parsed, and shout when it missed me.
+
+    The flag is keyed by DRAFT slot. The operator's roster id is a
+    different number, and keying the roster id into a slot-keyed flag
+    silently funds an opponent — a mistake nothing downstream can detect,
+    because roster ids are 1-12 as well. Since an override now outranks
+    Sleeper's own key, a mis-keyed one on a fully-entered board leaves MY
+    figures correct and my verdict confident, so every other tell stays
+    quiet. Hence two lines at startup: every parsed pair by slot, and a
+    loud warning whenever an override was supplied while my own resolved
+    slot still has real money from neither source — which is the exact
+    signature of that confusion.
+    """
+    if not overrides:
+        return
+    pairs = ", ".join(f"slot {slot} = ${overrides[slot]}" for slot in sorted(overrides))
+    print(f"dashboard: budget overrides parsed (DRAFT slots): {pairs}", file=stream)
+    if my_slot is None:
+        print(
+            "warning: --budget was given, but this draft seats no slot for "
+            f"roster id {config.my_roster_id} yet, so none of it could be "
+            "checked against my own slot",
+            file=err,
+        )
+        return
+    if my_slot in overrides or my_slot in draft.budget_by_slot:
+        return
+    print(
+        f"warning: --budget was given, but MY draft slot ({my_slot}) still "
+        f"has a budget from neither source. --budget is keyed by DRAFT "
+        f"slot; my roster id ({config.my_roster_id}) is a different number. "
+        f"If a slot above was meant to be mine, pass --budget "
+        f"{my_slot}=AMOUNT instead — until then my verdict stays withheld "
+        "and any slot named above belongs to somebody else",
+        file=err,
+    )
 
 
 def _mode_note(args: argparse.Namespace) -> str | None:
@@ -396,7 +486,7 @@ def _wire_poller(
     keeper mapping feeds both (the tracker's keeper counts and the
     engine's keeper exclusions must never disagree), and the same sheet
     provides positions, off-model flagging, and pricing."""
-    source, rows, keepers = runtime
+    source, rows, keepers, _draft = runtime
     tracker = DraftTracker(
         config,
         keepers_by_slot=keepers,

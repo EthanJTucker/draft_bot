@@ -15,7 +15,14 @@ from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.tracker import DraftTracker
 
 from .conftest import raw_auction_pick
-from .helpers_dashboard import ENTERED_BUDGETS, make_poller, make_tick, team_by_slot
+from .helpers_dashboard import (
+    ENTERED_BUDGETS,
+    MY_DRAFT_SLOT,
+    PERMUTED_SLOTS,
+    make_poller,
+    make_tick,
+    team_by_slot,
+)
 from .helpers_engine import sheet_row
 
 
@@ -578,6 +585,148 @@ def test_config_budget_lever_still_moves_the_money_but_not_the_verdict(config):
     assert "--budget" in state["nomination"]["verdict_reason"]
 
 
+def _permuted_poller(config, rows, *, budgets=None):
+    """The permuted board: my three keepers sit on DRAFT slot 4 and slot 7
+    is an opponent. My slot is resolved from the config's roster id against
+    the map, never passed in, exactly as live mode resolves it."""
+    keepers = {MY_DRAFT_SLOT: ("K1", "K2", "K3")}
+    tracker = DraftTracker(config, keepers_by_slot=keepers, clock=lambda: 0.0)
+    entries = [
+        make_tick(
+            nominee="B", offer=5, budgets=budgets, slot_to_roster_id=PERMUTED_SLOTS
+        )
+    ]
+    return make_poller(config, entries, rows, keepers_by_slot=keepers, tracker=tracker)
+
+
+def test_the_budget_rule_reads_my_draft_slot_and_not_the_roster_id(config):
+    """ANTI-CHEAT for the one property the whole fail-closed budget rule
+    rests on: it must read MY DRAFT SLOT.
+
+    Every other dashboard fixture builds slot_to_roster_id as the identity
+    map, and the config's roster id is 7, so "my slot" resolves to 7 in
+    all of them and a rule hardcoded to `board.team(7)` passes every one.
+    The hazard is not hypothetical: a draft carries the identity map only
+    while it sits in pre_draft, and every completed season in this league
+    carries a permuted one. So this board permutes, and both halves pin:
+
+    * mine defaulted, slot 7 real -> verdict WITHHELD. A rule reading slot
+      7 sees real money and advises off my fabricated budget.
+    * mine real, slot 7 defaulted -> verdict RENDERS. A rule reading slot
+      7 sees a default and blanks the tool while my money is fine.
+
+    The withheld reason must also name slot 4: "pass --budget SLOT=AMOUNT"
+    is unactionable at a 10-second timer, and an operator who reaches for
+    his roster id funds slot 7, which is somebody else.
+    """
+    rows = _keeper_board_rows()
+
+    mine_guessed = _permuted_poller(config, rows, budgets={7: 96}).step()
+    assert mine_guessed["me"]["slot"] == MY_DRAFT_SLOT  # roster 7 sits here
+    assert team_by_slot(mine_guessed, 7)["is_me"] is False
+    assert team_by_slot(mine_guessed, 7)["budget_is_default"] is False
+    assert mine_guessed["me"]["budget_is_default"] is True
+    assert mine_guessed["nomination"]["analysis"] is not None  # priced, not blank
+    assert mine_guessed["nomination"]["verdict"] is None
+    reason = mine_guessed["nomination"]["verdict_reason"]
+    assert "--budget 4=AMOUNT" in reason
+    assert "--budget 7" not in reason
+    assert "budget_4" in reason
+    mine_real = _permuted_poller(config, rows, budgets={4: 96}).step()
+    assert mine_real["me"]["slot"] == MY_DRAFT_SLOT
+    assert mine_real["me"]["remaining"] == 96  # the real money, on MY slot
+    assert mine_real["me"]["budget_is_default"] is False
+    assert team_by_slot(mine_real, 7)["budget_is_default"] is True
+    assert mine_real["nomination"]["verdict"] is not None
+
+
+def test_a_hand_keyed_budget_outranks_a_sleeper_key(config):
+    """ANTI-CHEAT for the decided precedence: explicit operator input
+    beats remote data.
+
+    The case that forced the decision is a commissioner who enters $200
+    for all twelve keeper teams. Every key is present, so nothing is
+    flagged and `budget_is_default` reads False, yet every figure in the
+    room is fiction. Under Sleeper-first the override is discarded and the
+    operator has no lever at all.
+
+    So this board carries a real budget_7 of $200 AND `--budget 7=96`. My
+    cap must pin at $85; an implementation that keeps Sleeper-first reads
+    $189 and fails. The discard is not silent either: a standing banner
+    names the slot and both amounts, because trading an invisible remote
+    failure for an invisible local one would be no improvement."""
+    rows = _keeper_board_rows()
+
+    entered = _keeper_board_poller(config, rows, budgets=ENTERED_BUDGETS).step()
+    assert entered["me"]["remaining"] == 200
+    assert entered["me"]["budget_is_default"] is False  # a real key, just wrong
+    assert entered["nomination"]["analysis"]["my_cap"] == 189
+    assert entered["nomination"]["verdict"] is not None  # nothing flags it
+
+    corrected = _keeper_board_poller(
+        config, rows, budgets=ENTERED_BUDGETS, overrides={7: 96}
+    ).step()
+    assert corrected["me"]["remaining"] == 96
+    assert corrected["me"]["max_bid"] == 85
+    assert corrected["nomination"]["analysis"]["my_cap"] == 85
+    assert corrected["me"]["budget_is_default"] is False
+    assert corrected["nomination"]["verdict"] is not None
+    (replaced,) = [
+        warning
+        for warning in corrected["settings_warnings"]
+        if warning["field"] == "budget_override"
+    ]
+    assert "slot 7 = $96" in replaced["expected"]
+    assert "slot 7 = $200" in replaced["actual"]
+    # Filling a hole is the ordinary case and stays quiet.
+    hole = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    assert not [
+        warning
+        for warning in hole["settings_warnings"]
+        if warning["field"] == "budget_override"
+    ]
+
+
+def test_the_room_flag_marks_fabricated_keeper_money_and_only_that(config):
+    """My max bid is a function of ALL twelve budgets (inflation sums the
+    room's money, the pace pool sums the other eleven teams' remaining),
+    so keying my own slot clears the verdict while the recommended number
+    still rides fabricated money. `defaulted_keeper_slots` marks it.
+
+    ANTI-CHEAT on the scoping. The naive version — any team whose budget
+    is defaulted — is checked here and fails: the second board has eleven
+    defaulted slots, none holding keepers, and must report an EMPTY list.
+    A defaulted budget is only provably wrong for a team that kept players
+    and therefore paid for them; amber on a keeper-free board would be a
+    permanent false warning on every lot."""
+    rows = _keeper_board_rows()
+
+    guessed = _keeper_board_poller(config, rows).step()
+    assert guessed["defaulted_keeper_slots"] == [7]
+
+    # My keeper slot is now covered; the other ELEVEN are still at the
+    # league default, hold no keepers, and so fabricate nothing.
+    covered = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    defaulted = [t["slot"] for t in covered["teams"] if t["budget_is_default"]]
+    assert defaulted == [slot for slot in range(1, 13) if slot != 7]
+    assert covered["defaulted_keeper_slots"] == []
+
+    # A second keeper team nobody entered: my verdict renders (my own
+    # money is real) while the room figure stays marked.
+    keepers = {7: ("K1", "K2", "K3"), 3: ("OFFSHEET",)}
+    tracker = DraftTracker(config, keepers_by_slot=keepers, clock=lambda: 0.0)
+    partial = make_poller(
+        config,
+        [make_tick(nominee="B", offer=5, budgets={7: 96})],
+        rows,
+        keepers_by_slot=keepers,
+        tracker=tracker,
+    ).step()
+    assert partial["me"]["budget_is_default"] is False
+    assert partial["nomination"]["verdict"] is not None
+    assert partial["defaulted_keeper_slots"] == [3]
+
+
 def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
     """The static page binds these exact field names; any rename anywhere
     in the snapshot (players-row worth, settings_warnings field, roster
@@ -617,12 +766,21 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         "timer_end_at",
         "nomination",
         "teams",
+        # MOVED: `defaulted_keeper_slots` is a deliberate addition to the
+        # /state contract. My max bid is computed from all twelve budgets,
+        # so it is a guess while ANY keeper team's money is fabricated,
+        # not only while mine is — and the page has no other way to know
+        # which defaulted slots are provably wrong rather than merely
+        # unentered.
+        "defaulted_keeper_slots",
         "me",
         "players",
         "sales",
         "off_model_player_ids",
         "note",
     }
+    # Slot 3 is the uncovered keeper team; slot 7 has a real key.
+    assert state["defaulted_keeper_slots"] == [3]
     nomination = state["nomination"]
     assert set(nomination) == {
         "status",
