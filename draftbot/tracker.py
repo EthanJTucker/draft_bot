@@ -32,6 +32,13 @@ NOMINATION_UNTRUSTED = "untrusted"
 
 FLEX_ELIGIBLE = ("RB", "WR", "TE")
 
+# Where a team's budget came from, in precedence order. These strings are
+# printed in the settings banner: the same impossible figure must not be
+# blamed on the ``--budget`` flag when Sleeper supplied it.
+BUDGET_FROM_OVERRIDE = "hand-keyed with --budget"
+BUDGET_FROM_SLEEPER = "Sleeper's own key"
+BUDGET_FROM_DEFAULT = "the league-wide default"
+
 
 @dataclass(frozen=True)
 class TeamState:
@@ -154,6 +161,24 @@ def diff_settings(
     return tuple(mismatches)
 
 
+def _ceiling_warnings(breaches: Sequence[tuple[int, str]]) -> list[SettingsMismatch]:
+    """The IMPOSSIBLE banner over ``DraftTracker._ceiling_breaches``.
+
+    One banner naming every breaching slot, never one per slot: the whole
+    point of the ceiling rule is that impossible money is rare and loud,
+    and a column of near-identical banners is how loud becomes wallpaper.
+    """
+    if not breaches:
+        return []
+    return [
+        SettingsMismatch(
+            field="budget_ceiling",
+            expected="a keeper team's budget cannot exceed its ceiling",
+            actual="; ".join(message for _, message in breaches),
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class Sale:
     """One completed sale as the board carries it: id, price, and buying
@@ -186,6 +211,17 @@ class BoardState:
     # Every sale in feed order (off_model_player_ids is the flagged subset).
     sales: tuple[Sale, ...] = ()
     timer_end_at: int | None = None
+    # Keeper slots the ceiling banner just proved impossible, in slot
+    # order. Provenance alone cannot carry this: a ceiling-breaching
+    # Sleeper key IS a real key, so budget_is_default reads False and the
+    # render layer would paint proven-wrong money like correct money.
+    impossible_keeper_slots: tuple[int, ...] = ()
+    # True once the draft order has moved out from under the keeper lists
+    # this tracker was built with, which puts every keeper-derived figure
+    # (roster panel, needs, open slots, max bid) on the wrong team. It
+    # rides the board rather than being re-derived from the banner's
+    # wording, so the banner and the suppressed verdict cannot disagree.
+    keeper_map_stale: bool = False
 
     def team(self, slot: int) -> TeamState:
         """The team drafting from ``slot``."""
@@ -220,9 +256,11 @@ class DraftTracker:
         config: LeagueConfig,
         *,
         keepers_by_slot: Mapping[int, Sequence[str]] | None = None,
+        keeper_slot_map: Mapping[int, int] | None = None,
         player_positions: Mapping[str, str] | None = None,
         expected_settings: Mapping[str, object] | None = None,
         value_sheet: Mapping[str, float] | None = None,
+        budget_overrides: Mapping[int, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
     ):
@@ -230,9 +268,26 @@ class DraftTracker:
         self._player_positions = dict(player_positions or {})
         self._expected_settings = dict(expected_settings or {})
         self._value_sheet = None if value_sheet is None else dict(value_sheet)
+        # Hand-keyed real budgets, by DRAFT SLOT. These OUTRANK Sleeper's
+        # own budget_<slot> keys: the operator can read the league sheet,
+        # and a commissioner who enters a flat league default for twelve
+        # keeper teams produces wrong money that no lever could correct
+        # if the remote value won. Discarding a figure Sleeper actually
+        # supplied raises its own banner, so the trade is never silent.
+        self._budget_overrides = dict(budget_overrides or {})
         self._keepers_by_slot = {
             slot: tuple(players) for slot, players in (keepers_by_slot or {}).items()
         }
+        # The slot-to-roster map ``keepers_by_slot`` was bridged through.
+        # Rosters carry keepers by ROSTER ID and this mapping is keyed by
+        # DRAFT SLOT, so it is only true of the order in force when it was
+        # built — and this league deals that order at draft time, often
+        # while the dashboard is already up. None declares no bridge and
+        # turns the staleness check off: a hand-built keeper mapping owns
+        # its own slots and has no startup map to fall behind.
+        self._keeper_slot_map = (
+            None if keeper_slot_map is None else dict(keeper_slot_map)
+        )
         self._clock = clock
         self._grace_seconds = grace_seconds
         # Cross-tick watermark: the most picks this tracker has ever seen.
@@ -240,6 +295,18 @@ class DraftTracker:
         # as regressed (it is missing sales we know happened).
         self._observed_sales = 0
         self._last_sale_at: float | None = None
+
+    @property
+    def budget_overrides(self) -> Mapping[int, int]:
+        """The hand-keyed ``--budget`` figures by DRAFT slot, read-only.
+
+        Exposed because the render layer has to be able to say "an
+        override was given and none of it landed on my slot" on every
+        poll, and it is the layer that knows which slot is mine. Handing
+        it a second copy of the same mapping is exactly how the two would
+        drift apart.
+        """
+        return MappingProxyType(self._budget_overrides)
 
     def update(self, tick: SourceTick) -> BoardState:
         """Fold one observation of the draft into a fresh board."""
@@ -255,12 +322,22 @@ class DraftTracker:
             and len(tick.picks) >= self._observed_sales
         )
         sold = {pick.player_id for pick in tick.picks}
+        # Computed once and used twice, so the banner's wording and the
+        # page's marks can never name different slots.
+        breaches = self._ceiling_breaches(tick.draft)
+        # Same discipline: one evaluation feeds both the RESTART banner and
+        # the flag the verdict fails closed on.
+        keeper_map_stale = self._keeper_map_is_stale(tick.draft)
         return BoardState(
             status=tick.draft.status,
             paused=tick.draft.paused,
             teams=tuple(self._team_state(slot, tick) for slot in self._slots(tick)),
             nomination=self._resolve_nomination(tick.draft, sold, picks_trusted),
-            settings_warnings=self._settings_warnings(tick.draft),
+            settings_warnings=self._settings_warnings(
+                tick.draft, breaches, keeper_map_stale
+            ),
+            impossible_keeper_slots=tuple(slot for slot, _ in breaches),
+            keeper_map_stale=keeper_map_stale,
             off_model_player_ids=self._off_model(tick),
             stale_endpoints=tick.stale_endpoints,
             sales=tuple(
@@ -281,32 +358,241 @@ class DraftTracker:
             if pick.player_id not in self._value_sheet
         )
 
-    def _settings_warnings(self, draft: DraftState) -> tuple[SettingsMismatch, ...]:
-        """Assumption diffs, plus the pre-entry keeper condition: a keeper
-        team without its budget_<slot> key shows the config default, which
-        overstates what it can spend. The warning holds while ANY
-        keeper-holding slot is uncovered — the commissioner enters budgets
-        one team at a time, and the first entry must not clear the banner
-        for the rest of the room."""
-        warnings = list(diff_settings(draft, self._expected_settings))
-        missing = sorted(
-            slot
-            for slot, players in self._keepers_by_slot.items()
-            if players and slot not in draft.budget_by_slot
-        )
-        if missing:
-            warnings.append(
-                SettingsMismatch(
-                    field="keeper_budgets",
-                    expected="budget_<slot> entered for every keeper team",
-                    actual=(
-                        f"missing for {len(missing)} keeper team(s) "
-                        f"(slots {', '.join(str(slot) for slot in missing)}); "
-                        f"shown at the ${self._config.auction_budget} default"
-                    ),
-                )
-            )
+    def _settings_warnings(
+        self,
+        draft: DraftState,
+        breaches: Sequence[tuple[int, str]],
+        keeper_map_stale: bool,
+    ) -> tuple[SettingsMismatch, ...]:
+        """Assumption diffs, the pre-entry keeper condition, the real
+        budget a hand-keyed ``--budget`` override discards, money no
+        keeper roster could have left over, and a keeper bridge the draft
+        order has moved out from under — none of which the operator should
+        have to discover from a wrong number.
+
+        The stale-bridge banner leads. Every other banner here describes a
+        number that is wrong; that one says the whole page is describing
+        the wrong teams, and it is the only one whose remedy is an action
+        the operator has to take.
+        """
+        warnings = self._keeper_map_warnings(draft) if keeper_map_stale else []
+        warnings.extend(diff_settings(draft, self._expected_settings))
+        warnings.extend(self._keeper_budget_warnings(draft))
+        warnings.extend(self._override_warnings(draft))
+        warnings.extend(_ceiling_warnings(breaches))
         return tuple(warnings)
+
+    def _keeper_map_is_stale(self, draft: DraftState) -> bool:
+        """Whether the draft order has moved since the keeper lists were
+        bridged onto draft slots.
+
+        ``keepers_by_slot`` is built once, at startup, from the rosters'
+        roster-id-keyed keeper lists and whatever ``slot_to_roster_id`` the
+        draft carried at that instant. Nothing re-fetches the rosters, so
+        when the commissioner deals the order the two halves of the board
+        stop describing the same team: the render layer re-resolves my slot
+        from the live map every tick, while my keepers, needs, open slots
+        and the max bid computed from them stay on the seat the old order
+        gave them.
+
+        The full repair is to hold the keeper lists by ROSTER ID and
+        re-derive the slot mapping every tick, which re-plumbs this seam
+        and is issue #23. This is the fail-closed stopgap in front of it:
+        on a board whose numbers belong to another team, silence is the one
+        answer that cannot be right.
+
+        An EMPTY bridge has nothing to fall behind. Every figure this rule
+        protects is slot-keyed and recomputed each tick, so on a board
+        that carries no keeper at all the deal moves my slot and nothing
+        else; blanking the tool there would cost the verdict and buy
+        nothing.
+        """
+        if self._keeper_slot_map is None:
+            return False
+        if not any(self._keepers_by_slot.values()):
+            return False
+        return dict(draft.slot_to_roster_id) != self._keeper_slot_map
+
+    def _keeper_map_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+        """The RESTART banner, naming the slots that moved.
+
+        Nothing on the page can be re-keyed to fix this and no flag
+        corrects it, so the banner asks for the one thing that does: a
+        restart, which rebuilds the bridge against the order now in force.
+        """
+        frozen = self._keeper_slot_map or {}
+        live = dict(draft.slot_to_roster_id)
+        moved = sorted(
+            slot
+            for slot in set(frozen) | set(live)
+            if frozen.get(slot) != live.get(slot)
+        )
+        return [
+            SettingsMismatch(
+                field="keeper_map_stale",
+                expected=(
+                    "the draft order this dashboard's keeper lists were "
+                    "built against at startup"
+                ),
+                actual=(
+                    "the order changed while the dashboard was running "
+                    f"(draft slots {', '.join(str(slot) for slot in moved)} "
+                    "now seat different rosters), so every keeper list, "
+                    "roster panel, need count and open-slot count still "
+                    "sits on the seat the old order gave it — RESTART the "
+                    "dashboard to rebuild them; the verdict stays withheld "
+                    "until you do"
+                ),
+            )
+        ]
+
+    def uncovered_keeper_slots(self, draft: DraftState) -> tuple[int, ...]:
+        """Keeper-holding DRAFT SLOTS showing the league-wide default
+        because neither source carries real money for them, in slot order.
+
+        This is the set whose money is provably wrong rather than merely
+        unentered: a team that kept players paid for them, so the full
+        league budget cannot be its post-keeper figure. A keeper-free
+        slot at the default is unverified, not wrong, which is why the
+        banner and the page's room mark both key on this set and not on
+        every defaulted slot.
+        """
+        return tuple(
+            sorted(
+                slot
+                for slot, players in self._keepers_by_slot.items()
+                if players
+                and slot not in draft.budget_by_slot
+                and slot not in self._budget_overrides
+            )
+        )
+
+    def _keeper_budget_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+        """The pre-entry keeper condition: a keeper team with no real
+        budget from EITHER source shows the config default, which
+        overstates what it can spend. The warning holds while ANY
+        keeper-holding slot is uncovered — the commissioner enters
+        budgets one team at a time, and the first entry must not clear
+        the banner for the rest of the room.
+
+        A hand-keyed override covers its slot here exactly as a Sleeper
+        key does. This banner names the money the page is SHOWING, and an
+        overridden slot shows a real number; listing it anyway would put
+        'shown at the $200 default' on screen beside a correct figure.
+        """
+        missing = self.uncovered_keeper_slots(draft)
+        if not missing:
+            return []
+        return [
+            SettingsMismatch(
+                field="keeper_budgets",
+                expected="budget_<slot> entered for every keeper team",
+                actual=(
+                    f"missing for {len(missing)} keeper team(s) "
+                    f"(slots {', '.join(str(slot) for slot in missing)}); "
+                    f"shown at the ${self._config.auction_budget} default"
+                ),
+            )
+        ]
+
+    def _override_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+        """The REPLACED banner: an override outranks a ``budget_<slot>``
+        key, so it can discard real server data.
+
+        Filling a hole is the ordinary case and stays quiet; replacing a
+        figure Sleeper actually supplied is not, and the operator has to
+        be able to tell the two apart — otherwise the flip trades one
+        invisible failure for another.
+        """
+        kept, discarded = [], []
+        for slot in sorted(self._budget_overrides):
+            amount = self._budget_overrides[slot]
+            live = draft.budget_by_slot.get(slot)
+            if live is not None and live != amount:
+                kept.append(f"slot {slot} = ${amount}")
+                discarded.append(f"slot {slot} = ${live}")
+        if not kept:
+            return []
+        return [
+            SettingsMismatch(
+                field="budget_override",
+                expected=f"{', '.join(kept)} (hand-keyed with --budget, shown)",
+                actual=f"{', '.join(discarded)} (Sleeper's own key, discarded)",
+            )
+        ]
+
+    def _resolved_budget(self, slot: int, draft: DraftState) -> tuple[int, str]:
+        """One slot's budget and where it came from.
+
+        The single statement of the precedence: explicit operator input
+        first, then the remote value, and ONLY then the league-wide
+        default — which is a fiction on a keeper board, so the provenance
+        travels with the number rather than being re-derived by each
+        caller. ``TeamState.budget_is_default`` and the ceiling banner
+        both read this, and a page that marks a figure the banner does
+        not name (or the reverse) is exactly the disagreement that keeps
+        them in one place.
+        """
+        if slot in self._budget_overrides:
+            return self._budget_overrides[slot], BUDGET_FROM_OVERRIDE
+        if slot in draft.budget_by_slot:
+            return draft.budget_by_slot[slot], BUDGET_FROM_SLEEPER
+        return self._config.auction_budget, BUDGET_FROM_DEFAULT
+
+    def _ceiling_breaches(self, draft: DraftState) -> list[tuple[int, str]]:
+        """Every keeper slot whose budget is IMPOSSIBLE, as (slot,
+        message) in slot order: provably wrong, not merely unverified.
+
+        Keeper cost is bounded below by the config's floor, so a slot
+        holding N keepers cannot carry more than ``budget - floor * N`` of
+        post-keeper money. This reads the RESOLVED budget, not only the
+        hand-keyed ones: the failure this whole rule exists for is a
+        commissioner typing one flat league budget into all twelve boxes,
+        which leaves every key present, clears the keeper_budgets banner,
+        and renders impossible money with nothing marked. The same figure
+        typed with ``--budget`` already raised a banner, and the same
+        money must not give opposite signals depending on who typed it —
+        so the message names the source instead.
+
+        The carve-out: a slot the keeper_budgets banner ALREADY names
+        (keeper team, no real money from either source, showing the
+        league default) is skipped. Its default can breach the same
+        ceiling, but that is one hole, and reporting it twice is how a
+        banner becomes wallpaper.
+
+        The CLI cannot make this check — it parses before the network on
+        purpose, and keeper lists arrive with the rosters — so it lands
+        here, where both facts are in hand.
+
+        The slots travel out beside the message because the banner is not
+        enough on its own: the same figure it calls impossible carries a
+        real provenance, so every mark on the page reads it as confident
+        money unless this set says otherwise.
+        """
+        floor = self._config.keeper_cost_floor
+        uncovered = set(self.uncovered_keeper_slots(draft))
+        breaches = []
+        for slot, keepers in sorted(self._keepers_by_slot.items()):
+            if not keepers:
+                continue
+            amount, source = self._resolved_budget(slot, draft)
+            if slot in uncovered:
+                # THE CARVE-OUT. This slot's money is the league default,
+                # which breaches the ceiling on any keeper roster — but
+                # the keeper_budgets banner already names it, by slot,
+                # and provenance already marks it. One hole, one banner.
+                continue
+            ceiling = self._config.auction_budget - floor * len(keepers)
+            if amount > ceiling:
+                breaches.append(
+                    (
+                        slot,
+                        f"slot {slot} = ${amount} ({source}) against a "
+                        f"ceiling of ${ceiling} ({len(keepers)} keeper(s) "
+                        f"at the ${floor} floor)",
+                    )
+                )
+        return breaches
 
     def _resolve_nomination(
         self, draft: DraftState, sold: set[str], picks_trusted: bool
@@ -348,7 +634,12 @@ class DraftTracker:
     def _team_state(self, slot: int, tick: SourceTick) -> TeamState:
         purchases = [pick for pick in tick.picks if pick.draft_slot == slot]
         keepers = self._keepers_by_slot.get(slot, ())
-        budget = tick.draft.budget_by_slot.get(slot)
+        # The default is a fiction on a keeper board, so the flag it
+        # raises must survive all the way to the page and the verdict.
+        # An override that merely fills a hole is the ordinary case; one
+        # that discards a real budget_<slot> is named by slot in the
+        # standing settings banner.
+        budget, source = self._resolved_budget(slot, tick.draft)
         open_slots = max(0, self._config.drafted_slots - len(keepers) - len(purchases))
         positions = [self._player_positions.get(player_id) for player_id in keepers]
         positions.extend(
@@ -358,8 +649,8 @@ class DraftTracker:
         return TeamState(
             slot=slot,
             roster_id=tick.draft.slot_to_roster_id.get(slot),
-            budget=self._config.auction_budget if budget is None else budget,
-            budget_is_default=budget is None,
+            budget=budget,
+            budget_is_default=source == BUDGET_FROM_DEFAULT,
             spent=sum(pick.amount or 0 for pick in purchases),
             keeper_count=len(keepers),
             purchase_count=len(purchases),

@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 from draftbot.config import LeagueConfig
 from draftbot.draft_engine import PlayerAnalysis, analyze_player
+from draftbot.models import slot_map_is_provisional
 from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.sources import SourceTick
 from draftbot.tracker import (
@@ -36,23 +37,76 @@ from draftbot.valuation import SheetRow
 
 def _verdict(  # pylint: disable=too-many-return-statements  # one return
     # per fail-closed rule keeps each suppression reason on its own line.
+    # pylint: disable=too-many-arguments  # one parameter per input a
+    # suppression rule reads; bundling them would only hide the count.
     status: str,
     paused: bool,
     high_bid: int | None,
     analysis: dict | None,
     error: str | None,
+    *,
+    budget_is_default: bool = False,
+    my_slot: int | None = None,
+    keeper_map_stale: bool = False,
 ) -> tuple[dict | None, str]:
     """The plain BID/PASS call, deliberately simple (nuance is the
     engine's job): BID exactly when the current high bid is BELOW my max
     bid — at equality I could only match, never beat, so equality is PASS.
 
-    Fail-closed by rule: no verdict on a paused draft, an untrusted picks
-    feed, a stale (beyond-grace) pointer, a lot the engine could not
-    price, or a lot with no recorded high bid (an open lot always carries
+    Fail-closed by rule. One rule per ``return None`` below, and this list
+    names ALL EIGHT of them in code order: adding a return without adding
+    its name here is what has silently mis-stated the count before, so the
+    list is the thing to keep whole and every count is read off it. No
+    verdict on a keeper bridge the draft order has moved out from under, a
+    paused draft, an untrusted picks feed, a board carrying no nomination
+    at all, a stale (beyond-grace) pointer, a lot the engine could not
+    price, a lot with no recorded high bid (an open lot always carries
     one; its absence is suspect data, and a fabricated $0 offer would
-    scream BID). A just-sold lot (within grace) keeps its verdict as the
-    retrospective call the bot was making when the hammer fell.
+    scream BID), or a MY-BUDGET figure that is the league-wide default
+    rather than a real one. A just-sold lot (within grace) keeps its
+    verdict as the retrospective call the bot was making when the hammer
+    fell.
+
+    The stale-bridge rule is FIRST, ahead of the seven that predate it and
+    without reordering any of them. Each of those seven withholds on one
+    input this poll can name, and leaves every roster, need and open-slot
+    count sitting on the team that actually owns it; that one says the
+    keeper lists behind the rosters, the needs, the open slots and the max
+    bid are still on the seats the old draft order gave them, so the
+    inputs the later rules read are themselves mis-attributed. It is also
+    the only reason here that never clears without the operator
+    restarting, so it is the only one worth spending the reason line on.
+
+    The budget rule is deliberately narrow, and the narrowness is the
+    point. It reads MY slot only, and it clears as soon as that slot
+    carries real money from either source (the operator's ``--budget``
+    override or a Sleeper key). Suppressing on any defaulted slot in the
+    room would blank the tool for every lot of a draft whose commissioner
+    never enters budgets — no tool at all, which is worse than a labeled
+    one.
+
+    The narrowness has a real cost and it is NOT hidden. ``max_bid`` and
+    ``inflation`` are functions of all twelve budgets, so keying my slot
+    alone clears the verdict while the recommended number still rides the
+    room's fabricated money. That is what ``defaulted_keeper_slots`` in
+    the snapshot is for: the page renders the max bid amber and qualifies
+    it as a room default while any keeper-holding slot is still uncovered,
+    on top of the standing settings banner and the per-team flag.
     """
+    if keeper_map_stale:
+        # Deliberately says the lists are on the OLD SEATS and not that
+        # they are somebody else's: a permutation that happens to fix my
+        # own slot leaves the MY TEAM panel and the max bid exactly right
+        # (2024 fixed slots 1 and 3, 2025 fixed slot 6), and what is
+        # wrong there is the other teams' rows. Same wording the banner
+        # gets right one line above, which also names the moved slots.
+        return None, (
+            "the draft order changed after this dashboard started, so every "
+            "keeper list, roster panel, need count and open-slot count here "
+            "still sits on the seat the old order gave it; the banner above "
+            "names the slots that moved — RESTART the dashboard to rebuild "
+            "them, not advising until you do"
+        )
     if paused:
         return None, "draft paused"
     if status == NOMINATION_UNTRUSTED:
@@ -65,6 +119,21 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
         return None, error or "no analysis"
     if high_bid is None:
         return None, "no recorded high bid for this lot; not advising on suspect data"
+    if budget_is_default:
+        # Name the slot. "--budget SLOT=AMOUNT" is unactionable at a
+        # 10-second timer, and worse than unactionable if the operator
+        # reaches for his roster id: this league permutes slot and roster
+        # id when it assigns the draft order, so the two are different
+        # numbers on draft night. Interpolating the RESOLVED draft slot
+        # turns the reason into the exact command.
+        slot_key = "<slot>" if my_slot is None else str(my_slot)
+        flag_key = "SLOT" if my_slot is None else str(my_slot)
+        return None, (
+            f"my budget is the league-wide default, not a real one "
+            f"(Sleeper carries no budget_{slot_key} key for my draft "
+            f"slot); pass --budget {flag_key}=AMOUNT (DRAFT slot, not "
+            "roster id) to advise"
+        )
     action = "BID" if high_bid < analysis["max_bid"] else "PASS"
     label = "final" if status == NOMINATION_SOLD_GRACE else "live"
     return {
@@ -192,22 +261,130 @@ class DashboardPoller:
             "status": board.status,
             "paused": board.paused,
             "stale_endpoints": sorted(board.stale_endpoints),
-            "settings_warnings": [
-                {
-                    "field": warning.field,
-                    "expected": str(warning.expected),
-                    "actual": str(warning.actual),
-                }
-                for warning in board.settings_warnings
-            ],
+            "settings_warnings": self._settings_warnings(board, my_slot),
             "timer_end_at": board.timer_end_at,
             "nomination": self._nomination_json(board, my_slot),
             "teams": [self._team_json(team, my_slot) for team in board.teams],
+            "defaulted_keeper_slots": self._defaulted_keeper_slots(board),
+            # The ceiling banner's own set, verbatim. A sibling key rather
+            # than more entries in the one above: those slots show money
+            # nobody entered, these show money somebody DID enter and
+            # cannot be true, and the page says which on the caps line.
+            "impossible_keeper_slots": list(board.impossible_keeper_slots),
+            # The third mark the page paints, and the only board-wide one:
+            # on a bridge the draft order has moved past, the keeper lists
+            # behind every roster, need count and open-slot count are on
+            # the wrong seats, and the max bid is computed from all of
+            # them. Withholding the verdict is not enough on its own — the
+            # figures stay on screen, and an unmarked 30px number reads as
+            # a fact. The banner that says so is free text in
+            # settings_warnings, which nothing on the page parses, so the
+            # same one boolean the verdict fails closed on comes here too.
+            "keeper_map_stale": board.keeper_map_stale,
             "me": self._me_json(board, my_slot),
             "players": self._players_json(board),
             "sales": [self._sale_json(sale) for sale in board.sales],
             "off_model_player_ids": list(board.off_model_player_ids),
             "note": self._note,
+        }
+
+    def _settings_warnings(self, board: BoardState, my_slot: int | None) -> list[dict]:
+        """The tracker's standing banners, plus the one only this layer
+        can raise: a ``--budget`` that never landed on my slot."""
+        warnings = [
+            {
+                "field": warning.field,
+                "expected": str(warning.expected),
+                "actual": str(warning.actual),
+            }
+            for warning in board.settings_warnings
+        ]
+        missed = self._override_missed_my_slot(board, my_slot)
+        if missed is not None:
+            warnings.append(missed)
+        return warnings
+
+    def _override_missed_my_slot(
+        self, board: BoardState, my_slot: int | None
+    ) -> dict | None:
+        """The startup ``--budget`` check, re-run against the LIVE board.
+
+        The CLI runs that check once, against the draft object it fetched
+        at startup. On draft night the dashboard comes up before the
+        commissioner assigns the draft order, so that one check reads a
+        placeholder slot map and can conclude nothing — and a line
+        printed into scrollback before the order landed is not where the
+        operator is looking anyway. My slot is re-resolved every poll, so
+        the same condition rides the board and reaches the page.
+
+        Quiet unless an override was given AND my own slot still shows
+        the league-wide default: keyed correctly it never fires, and with
+        no override at all it never fires either. That board is the
+        ordinary un-entered one, which already carries the keeper_budgets
+        banner and a withheld verdict naming the flag; a second banner
+        repeating them would only crowd the screen.
+
+        Before the order is dealt this cannot rule at all, and BOTH of
+        its answers would be wrong — the same reason the CLI refuses, on
+        the same shared predicate. So that window gets the placeholder
+        banner instead, which names no flag to type.
+        """
+        overrides = self._tracker.budget_overrides
+        if not overrides:
+            return None
+        named = ", ".join(f"slot {slot}" for slot in sorted(overrides))
+        if self._my_slot is None and slot_map_is_provisional(
+            board.status, ((team.slot, team.roster_id) for team in board.teams)
+        ):
+            # An explicit --my-slot is exempt (mirroring the CLI): that
+            # number came from the operator, not from the map, so an
+            # undealt order cannot make it stale.
+            return self._order_not_dealt(named)
+        if my_slot is None or not board.team(my_slot).budget_is_default:
+            return None
+        return {
+            "field": "budget_override_missed_my_slot",
+            "expected": (
+                f"--budget {my_slot}=AMOUNT — {my_slot} is MY draft slot, "
+                f"and roster id {self._config.my_roster_id} is a different "
+                "number"
+            ),
+            "actual": (
+                f"--budget named {named}; my own money is still the "
+                f"${self._config.auction_budget} league default, so if one "
+                "of those was meant to be mine it is keyed by the wrong "
+                "identifier and belongs to somebody else"
+            ),
+        }
+
+    def _order_not_dealt(self, named: str) -> dict:
+        """The placeholder banner: --budget was given, and this board
+        cannot say anything about it yet.
+
+        Deliberately NOT a clean bill and deliberately NOT an
+        instruction. A mis-key to my roster id matches the placeholder,
+        so every provenance signal on this board reads correct and
+        silence would amount to asserting the flag landed — on a board
+        where that is unknowable. The correct flag for my eventual slot
+        looks wrong here for the same reason. One sentence is true of
+        both: the order is not dealt, so nothing is checked. It names no
+        slot to re-key by, and it clears itself the moment the order
+        lands, when the real check takes over.
+        """
+        return {
+            "field": "budget_order_not_dealt",
+            "expected": (
+                "the draft order dealt, so --budget can be checked "
+                "against MY draft slot"
+            ),
+            "actual": (
+                f"--budget named {named}, but this draft is still in "
+                "pre_draft carrying the placeholder map (slot N = roster "
+                "N), which this league permutes when the order is dealt. "
+                "Which DRAFT slot is mine can still change, so none of "
+                "the above is checked against it and the money shown for "
+                "those slots is not confirmed to be on the right rows"
+            ),
         }
 
     def _resolve_my_slot(self, board: BoardState) -> int | None:
@@ -223,7 +400,14 @@ class DashboardPoller:
         player_id = nomination.player_id
         analysis, pre_sale, error = self._analysis_for(board, my_slot)
         verdict, reason = _verdict(
-            nomination.status, board.paused, nomination.highest_offer, analysis, error
+            nomination.status,
+            board.paused,
+            nomination.highest_offer,
+            analysis,
+            error,
+            budget_is_default=self._budget_is_default(board, my_slot),
+            my_slot=my_slot,
+            keeper_map_stale=board.keeper_map_stale,
         )
         if verdict is not None and "draft" in board.stale_endpoints:
             # The draft object is the ONLY carrier of the nomination
@@ -259,6 +443,39 @@ class DashboardPoller:
             "profit": profit,
             "last_of_tier": bool(tier and tier["last_of_tier"]),
         }
+
+    def _budget_is_default(self, board: BoardState, my_slot: int | None) -> bool:
+        """Whether MY money on this board is the league-wide default
+        rather than a real budget.
+
+        An unresolved slot reads False on purpose: that board cannot be
+        priced at all, so the analysis rule has already suppressed the
+        verdict with the more specific reason, and claiming a budget
+        problem on top of it would be a second, wrong explanation.
+        """
+        if my_slot is None:
+            return False
+        return board.team(my_slot).budget_is_default
+
+    def _defaulted_keeper_slots(self, board: BoardState) -> list[int]:
+        """Keeper-holding slots whose money on this board is the
+        league-wide default, in slot order.
+
+        The ROOM, not my slot. ``analysis.max_bid`` and ``inflation`` are
+        functions of all twelve budgets (the engine sums the room's money
+        and the other eleven teams' remaining), so a fabricated budget
+        anywhere in the keeper room degrades my recommended number even
+        when my own slot carries real money. Keying on keeper-holding
+        slots is deliberate: a defaulted budget is only provably WRONG
+        for a team that kept players, and marking every defaulted slot
+        would paint a permanent amber warning on a keeper-free board that
+        carries no fabricated money at all.
+        """
+        return [
+            team.slot
+            for team in board.teams
+            if team.budget_is_default and self._keepers_by_slot.get(team.slot)
+        ]
 
     def _analysis_for(
         self, board: BoardState, my_slot: int | None
@@ -409,6 +626,9 @@ class DashboardPoller:
             "remaining": me.remaining,
             "open_slots": me.open_slots,
             "max_bid": me.max_bid,
+            # Every figure above is budget minus spend, so a defaulted
+            # budget makes all of them a guess. The page marks them.
+            "budget_is_default": me.budget_is_default,
             "needs": {label: count for label, count in me.needs.items() if count},
             "roster": roster,
         }

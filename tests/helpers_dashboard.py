@@ -12,6 +12,44 @@ from draftbot.models import parse_draft, parse_picks
 from draftbot.sources import SourceTick
 from draftbot.tracker import DraftTracker
 
+# The commissioner HAS entered every slot, at the league budget. Numerically
+# identical to leaving the keys out (the fallback is the same $200), but the
+# provenance differs, and the poller's budget rule reads the provenance: a
+# fixture that wants a BID/PASS verdict must carry real budgets, because a
+# figure the tool guessed cannot advise. Fixtures that mean to exercise the
+# GUESSED board leave budgets out.
+ENTERED_BUDGETS = {slot: 200 for slot in range(1, 13)}
+
+# A slot_to_roster_id map that is NOT the identity. My roster id is 7
+# (league_config.toml), and here it drafts from slot 4 while slot 7
+# belongs to roster 11 — a 3-cycle, so it stays a real permutation. Every
+# completed season in this league carries a permuted map; the identity map
+# a draft shows while it sits in pre_draft is a placeholder that changes
+# when the draft order is assigned. Any fixture exercising "my slot" uses
+# this, because on an identity map a rule reading the wrong identifier
+# passes anyway.
+PERMUTED_SLOTS = {
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 7,
+    5: 5,
+    6: 6,
+    7: 11,
+    8: 8,
+    9: 9,
+    10: 10,
+    11: 4,
+    12: 12,
+}
+MY_DRAFT_SLOT = 4
+
+# The PLACEHOLDER map a draft carries before its order is dealt: slot N =
+# roster N. Spelled out rather than left to ``make_tick``'s default,
+# because the fixtures that pair it with PERMUTED_SLOTS are about the
+# moment one becomes the other.
+IDENTITY_SLOTS = {slot: slot for slot in range(1, 13)}
+
 
 class ScriptedSource:
     """poll() serves scripted entries in order (the last one repeats);
@@ -42,10 +80,19 @@ def make_tick(
     stale=(),
     teams=12,
     budgets=None,
+    slot_to_roster_id=None,
 ):
     # pylint: disable=too-many-arguments  # tick builder mirroring the draft
     # object's independent live fields one-to-one.
-    """One SourceTick built through the real parsers, like a source would."""
+    """One SourceTick built through the real parsers, like a source would.
+
+    ``slot_to_roster_id`` defaults to the identity map, which is what the
+    live draft carries while it sits in pre_draft. That is a PLACEHOLDER:
+    every completed season in this league carries a permuted map, so slot
+    and roster id stop matching the moment the draft order is assigned.
+    A fixture that means to exercise "my slot" must pass a non-identity
+    map, or a rule reading the wrong identifier passes it anyway.
+    """
     metadata = {}
     if paused:
         metadata["paused"] = "true"
@@ -64,7 +111,12 @@ def make_tick(
         "type": "auction",
         "settings": settings,
         "metadata": metadata,
-        "slot_to_roster_id": {str(slot): slot for slot in range(1, teams + 1)},
+        "slot_to_roster_id": {
+            str(slot): roster_id
+            for slot, roster_id in (
+                slot_to_roster_id or {slot: slot for slot in range(1, teams + 1)}
+            ).items()
+        },
     }
     return SourceTick(
         draft=parse_draft(raw),

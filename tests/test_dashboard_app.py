@@ -1,10 +1,16 @@
-"""The FastAPI surface and the CLI: /state, the static page, the wiring.
+"""The FastAPI surface and the CLI: /state, the poll loop, the wiring.
 
 The TestClient drives the real ASGI app; the poll loop is stepped by hand
 (deterministic — no thread, no timer) except for the one test that runs
 ``run_poll_loop`` in a real thread, because that loop is the production
 write path. CLI tests inject a fake server the same way trackdemo injects
 its transport.
+
+The ``/`` route and everything ``static/index.html`` puts on the screen
+live in ``tests/test_dashboard_page.py``, whose docstring is where the
+limits of the substring guard over that page are written down. Read it
+before changing a byte of the page: no test in this repo executes its
+JavaScript.
 """
 
 from __future__ import annotations
@@ -19,10 +25,17 @@ from draftbot.dashboard.app import create_app, main, run_poll_loop
 from draftbot.valuesheet import write_csv
 
 from .conftest import REPO_ROOT, FakeTransport
-from .helpers_dashboard import make_poller, make_tick
+from .helpers_dashboard import (
+    IDENTITY_SLOTS,
+    MY_DRAFT_SLOT,
+    PERMUTED_SLOTS,
+    make_poller,
+    make_tick,
+)
 from .helpers_engine import sheet_row
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
+CONFIG = REPO_ROOT / "league_config.toml"
 
 # The real config's draft id (tests use the checked-in league_config.toml).
 DRAFT_ID = "1389692302259138561"
@@ -83,43 +96,6 @@ def test_state_endpoint_serves_even_before_the_first_poll(config):
     payload = client.get("/state").json()
     assert payload["ok"] is False
     assert payload["poll_count"] == 0
-
-
-def test_index_page_carries_a_slot_for_every_required_element(config):
-    """The static page is one self-contained file (no CDN, no npm) whose
-    skeleton binds every element the issue names: nominee, high bid,
-    worth, room price, max bid, verdict, profit, last-of-tier, the
-    positional table, team budgets, and my pinned roster."""
-    poller = make_poller(config, [make_tick()], _rows())
-    client = TestClient(create_app(poller))
-
-    response = client.get("/")
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/html")
-    page = response.text
-    for element_id in (
-        'id="nominee"',
-        'id="high-bid"',
-        'id="worth"',
-        'id="room-price"',
-        'id="max-bid"',
-        'id="verdict"',
-        'id="profit"',
-        'id="tier-warning"',
-        'id="players"',
-        'id="teams"',
-        'id="my-team"',
-        'id="banners"',
-        'id="foot-note"',
-    ):
-        assert element_id in page
-    assert "http://" not in page.replace("http://localhost", "")
-    assert "https://" not in page  # fully self-contained: no external assets
-    assert "/state" in page
-    # The honest-failure surfaces: a crashed render says so in red, and
-    # the default-budget asterisk carries its legend.
-    assert "PAGE RENDER FAILED" in page
-    assert "budget not entered on Sleeper yet" in page
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
@@ -234,16 +210,26 @@ def test_replay_cli_accepts_a_real_sheet_csv(tmp_path):
     assert state["note"] is None
 
 
-def _live_transport(rosters):
+# Live-mode fixtures use the permuted slot map (shared with the state
+# tests), so a rule reading the wrong identifier cannot pass by accident.
+def _live_transport(rosters, *, slots=None, settings=None, status="pre_draft"):
     """Canned live-mode payloads: the draft object, the rosters (keeper
-    carrier), and an empty picks feed."""
+    carrier), and an empty picks feed.
+
+    ``status`` is a parameter because the startup guard reads it as well
+    as the slot map: a fixture that can only build ``pre_draft`` boards
+    cannot tell a guard that reads both from one that reads the map alone.
+    """
     draft = {
         "draft_id": DRAFT_ID,
-        "status": "pre_draft",
+        "status": status,
         "type": "auction",
-        "settings": {},
+        "settings": settings or {},
         "metadata": {},
-        "slot_to_roster_id": {str(slot): slot for slot in range(1, 13)},
+        "slot_to_roster_id": {
+            str(slot): roster_id
+            for slot, roster_id in (slots or PERMUTED_SLOTS).items()
+        },
     }
     return FakeTransport(
         {f"/draft/{DRAFT_ID}": draft, "/rosters": rosters, "/picks": []}
@@ -319,10 +305,15 @@ def test_live_mode_allow_no_keepers_waves_through_an_empty_keeper_map(tmp_path):
 def test_live_mode_wires_roster_keepers_into_the_board(tmp_path):
     """Rosters WITH keepers start cleanly and the keeper mapping flows to
     both tracker and engine: the kept player is off the buyable table and
-    pinned on my roster as a keeper."""
+    pinned on my roster as a keeper.
+
+    Rosters key their keepers by ROSTER ID and the board keys everything
+    by DRAFT SLOT, and this fixture's map sends roster 7 to slot 4. A
+    bridge that conflated the two would hang my keeper on slot 7, an
+    opponent, and leave my own roster empty."""
     rosters = [
-        {"roster_id": slot, "keepers": ["KP"] if slot == 7 else []}
-        for slot in range(1, 13)
+        {"roster_id": roster_id, "keepers": ["KP"] if roster_id == 7 else []}
+        for roster_id in range(1, 13)
     ]
     server = CapturingServer()
 
@@ -338,11 +329,409 @@ def test_live_mode_wires_roster_keepers_into_the_board(tmp_path):
     assert state["ok"] is True
     assert [player["player_id"] for player in state["players"]] == ["B"]
     me = state["me"]
-    assert me["slot"] == 7  # roster 7 resolved through slot_to_roster_id
+    assert me["slot"] == MY_DRAFT_SLOT  # roster 7 drafts from slot 4 here
     assert me["open_slots"] == 14  # 15 drafted slots minus the keeper
     keeper_entries = [entry for entry in me["roster"] if entry["keeper"]]
     assert [entry["player_id"] for entry in keeper_entries] == ["KP"]
     assert keeper_entries[0]["price"] is None  # kept, not bought
+
+
+def _three_keeper_rosters():
+    """My roster (id 7) keeps three; nobody else keeps anyone."""
+    return [
+        {
+            "roster_id": roster_id,
+            "keepers": ["KP", "K2", "K3"] if roster_id == 7 else [],
+        }
+        for roster_id in range(1, 13)
+    ]
+
+
+def test_live_mode_budget_flag_puts_my_real_money_on_the_board(tmp_path):
+    """End to end through the CLI on the board this league will actually
+    show: Sleeper carries no budget_<slot> key for anyone (settings is
+    empty), and my three keepers sit on DRAFT SLOT 4. Left alone the page
+    reads the $200 league default — $189 of max bid. `--budget 4=96` keys
+    the real number off the league sheet and the page reads $85.
+
+    The flag is repeatable, so slot 3 is set in the same run and must
+    land too, while every un-keyed slot stays honestly marked."""
+    server = CapturingServer()
+
+    code = main(
+        _live_args(
+            tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96", "--budget", "3=143"
+        ),
+        server=server,
+        out=io.StringIO(),
+        http_get=_live_transport(_three_keeper_rosters()),
+    )
+
+    assert code == 0
+    state = server.poller.step()
+    me = state["me"]
+    assert me["slot"] == MY_DRAFT_SLOT
+    assert me["open_slots"] == 12  # 15 drafted slots minus three keepers
+    assert me["remaining"] == 96  # the real budget, not the $200 default
+    assert me["max_bid"] == 85  # 96 - 11 held; the default would say 189
+    assert me["budget_is_default"] is False
+    slots = {team["slot"]: team for team in state["teams"]}
+    assert slots[3]["remaining"] == 143
+    assert slots[3]["budget_is_default"] is False
+    assert slots[5]["remaining"] == 200
+    assert slots[5]["budget_is_default"] is True
+
+
+def test_startup_echoes_the_overrides_and_shouts_when_they_miss_my_slot(tmp_path):
+    """The two startup lines that make a slot-keyed flag safe to use.
+
+    `--budget` takes a DRAFT slot; the operator's roster id is 7 and, on
+    this map, his draft slot is 4. Keying the roster id funds slot 7,
+    which is somebody else, and nothing downstream can detect it — roster
+    ids are 1-12 as well. So startup echoes every parsed pair, and shouts
+    when an override was supplied while MY resolved slot still has real
+    money from neither source, which is exactly that mistake's signature.
+
+    Anti-cheat: the mis-keyed run must be shown to actually go wrong (my
+    money stays defaulted, slot 7's does not), so the warning is pinned
+    against a real failure and not an imaginary one. And the correct run
+    must stay quiet, or an always-on warning would be ignored by draft
+    night."""
+    server = CapturingServer()
+    out = io.StringIO()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "7=96"),
+        server=server,
+        out=out,
+        http_get=_live_transport(_three_keeper_rosters()),
+    )
+
+    assert code == 0  # it still serves; this is a warning, not a refusal
+    printed = out.getvalue()
+    assert "budget overrides parsed (DRAFT slots): slot 7 = $96" in printed
+    assert "MY draft slot (4)" in printed
+    assert "--budget 4=AMOUNT" in printed
+    assert "roster id (7)" in printed
+    # The mistake the warning is about, measured: my own money is still a
+    # guess and an opponent quietly took the $96.
+    state = server.poller.step()
+    assert state["me"]["slot"] == MY_DRAFT_SLOT
+    assert state["me"]["budget_is_default"] is True
+    assert state["nomination"]["verdict"] is None
+    slots = {team["slot"]: team for team in state["teams"]}
+    assert slots[7]["remaining"] == 96
+    assert slots[7]["budget_is_default"] is False
+
+    quiet = io.StringIO()
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96"),
+        server=CapturingServer(),
+        out=quiet,
+        http_get=_live_transport(_three_keeper_rosters()),
+    )
+
+    assert code == 0
+    assert "budget overrides parsed (DRAFT slots): slot 4 = $96" in quiet.getvalue()
+    assert "MY draft slot" not in quiet.getvalue()
+
+
+def _stale_map_banners(state):
+    """The RESTART banner for a keeper bridge the order has moved past."""
+    return [
+        warning
+        for warning in state["settings_warnings"]
+        if warning["field"] == "keeper_map_stale"
+    ]
+
+
+def test_startup_draws_no_conclusion_while_the_draft_order_is_a_placeholder(tmp_path):
+    """The launch sequence draft night will actually use.
+
+    The dashboard comes up BEFORE the commissioner assigns the draft
+    order, so the draft sits in pre_draft carrying the placeholder map
+    (slot N = roster N) that this league permutes the moment the order
+    lands. Startup resolves my slot from that map exactly once, which
+    means it is drawing conclusions from a number about to change. Both
+    directions were wrong:
+
+    * `--budget 7=96`, keyed to my ROSTER id, matches the placeholder, so
+      the guard printed a clean bill and the operator learned nothing —
+      and once the order landed, slot 7 was an opponent.
+    * `--budget 4=96`, the CORRECT figure for my eventual draft slot,
+      tripped the guard, which told him to pass `--budget 7=AMOUNT`
+      instead: to move his real money onto that same opponent's row.
+
+    A tool that instructs the wrong action is worse than one that says
+    nothing, so on a placeholder map neither line is printed. Startup
+    says the order is not assigned yet and stops; the live board carries
+    the check from there.
+    """
+    for flag in ("7=96", "4=96"):
+        out = io.StringIO()
+
+        code = main(
+            _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", flag),
+            server=CapturingServer(),
+            out=out,
+            http_get=_live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS),
+        )
+
+        assert code == 0
+        printed = out.getvalue()
+        assert f"budget overrides parsed (DRAFT slots): slot {flag[0]} = $96" in printed
+        assert "order is not assigned yet" in printed
+        # No verdict on the flag, in EITHER direction: no all-clear, and
+        # above all no instruction to re-key it against the placeholder.
+        assert "MY draft slot" not in printed
+        assert "AMOUNT instead" not in printed
+
+
+def test_startup_reads_the_status_too_and_not_only_the_slot_map(tmp_path):
+    """ANTI-CHEAT on the status half of the shared placeholder predicate,
+    which no CLI board varied before this one.
+
+    The two runs below are the same league, the same identity map and the
+    same mis-keyed flag. The only difference is the draft's status, so
+    nothing but the status half can explain the difference in what gets
+    printed.
+
+    A commissioner who never assigns a custom order leaves the identity
+    map in place while the status moves to ``drafting``. That map is then
+    the real seating, not a placeholder, and the mis-key is checkable — so
+    the guard has to let the check run. Reading the map alone silences the
+    warning there and prints "the order is not assigned yet" over a draft
+    that is underway.
+
+    The poller side of the same pair is pinned in
+    ``tests/test_dashboard_budget.py``, so the status half dies on both
+    surfaces exactly as the map half does.
+    """
+    rosters = _three_keeper_rosters()
+    undealt = io.StringIO()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96"),
+        server=CapturingServer(),
+        out=undealt,
+        http_get=_live_transport(rosters, slots=IDENTITY_SLOTS),
+    )
+
+    assert code == 0
+    assert "order is not assigned yet" in undealt.getvalue()
+    assert "MY draft slot" not in undealt.getvalue()
+
+    live = io.StringIO()
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "4=96"),
+        server=CapturingServer(),
+        out=live,
+        http_get=_live_transport(rosters, slots=IDENTITY_SLOTS, status="drafting"),
+    )
+
+    assert code == 0
+    printed = live.getvalue()
+    assert "order is not assigned yet" not in printed
+    assert "MY draft slot (7)" in printed  # roster 7 seats at slot 7 here
+    assert "--budget 7=AMOUNT" in printed
+
+
+def test_an_explicit_my_slot_is_checked_even_before_the_order_lands(tmp_path):
+    """ANTI-CHEAT on the placeholder caveat: it is about the MAP, not
+    about the status.
+
+    `--my-slot 4` is the operator stating his slot himself, so resolving
+    it never touches the slot map and an undealt order cannot make it
+    stale. The check must still run here and still catch `--budget 7=96`.
+    A caveat read off the draft object alone — dropping the "and my slot
+    did not come from that map" half — goes quiet on this board and fails
+    here. The other half of the pair is pinned next door: the shouts test
+    runs a pre_draft draft whose order HAS been dealt, so a caveat keyed
+    on the status alone swallows the loud warning and fails there."""
+    out = io.StringIO()
+
+    code = main(
+        _live_args(
+            tmp_path,
+            _keeper_sheet(tmp_path),
+            "--my-slot",
+            "4",
+            "--budget",
+            "7=96",
+        ),
+        server=CapturingServer(),
+        out=out,
+        http_get=_live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS),
+    )
+
+    assert code == 0
+    printed = out.getvalue()
+    assert "order is not assigned yet" not in printed
+    assert "MY draft slot (4)" in printed
+    assert "--budget 4=AMOUNT" in printed
+
+
+def test_a_mis_keyed_override_is_named_in_a_banner_once_sleeper_carries_keys(tmp_path):
+    """The quiet case the precedence flip creates, and its remaining tell.
+
+    Once the commissioner enters budget_<slot> for everyone, a mis-keyed
+    `--budget 7=96` leaves MY slot 4 on its correct Sleeper key. My money
+    is right, my verdict renders, and the startup warning above correctly
+    stays silent — nothing about my own half is wrong. But slot 7's real
+    budget was just discarded for a number typed against the wrong
+    identifier, and that team's money feeds inflation and the pace pool.
+
+    The standing settings banner is what names it, by slot and with both
+    amounts. Without it the flip would trade one invisible failure for
+    another."""
+    server = CapturingServer()
+    out = io.StringIO()
+    entered = {f"budget_{slot}": 150 for slot in range(1, 13)}
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path), "--budget", "7=96"),
+        server=server,
+        out=out,
+        http_get=_live_transport(_three_keeper_rosters(), settings=entered),
+    )
+
+    assert code == 0
+    assert "MY draft slot" not in out.getvalue()  # my own money is fine
+    state = server.poller.step()
+    assert state["me"]["remaining"] == 150  # my real key, untouched
+    assert state["me"]["budget_is_default"] is False
+    # SOURCE PIN for the board-wide staleness flag, and the only place a
+    # realistic board holds it to False. This board is sound (the bridge
+    # matches the seating) but noisy: it carries budget and keeper_budgets
+    # warnings, so `bool(board.settings_warnings)` correlates with the
+    # flag on the two boards that guard it elsewhere — none at all, and
+    # only the stale one — and reads True here. That mis-source is one
+    # dropped field filter away, because the stale fact is DELIVERED as a
+    # settings warning, and it paints the 30px max bid, my money and my
+    # caps amber and prints OLD DRAFT ORDER — RESTART on a healthy board.
+    assert state["keeper_map_stale"] is False
+    (banner,) = [
+        warning
+        for warning in state["settings_warnings"]
+        if warning["field"] == "budget_override"
+    ]
+    assert "slot 7 = $96" in banner["expected"]
+    assert "slot 7 = $150" in banner["actual"]
+
+
+def test_the_order_landing_mid_session_stops_the_live_dashboard(tmp_path):
+    """The startup keeper bridge, pinned through the real CLI wiring.
+
+    Keeper lists come from the rosters keyed by ROSTER ID and are bridged
+    onto DRAFT SLOTS exactly once, here, against the map the draft carried
+    at startup. Nothing re-fetches the rosters, so when the commissioner
+    deals the order mid-session that bridge starts describing the room the
+    placeholder described, while my own slot is re-resolved from the live
+    board every poll — the MY TEAM panel then belongs to whoever held my
+    old seat.
+
+    The full re-derivation is issue #23. This pins the stopgap end to end,
+    and above all pins the WIRING: `keeper_slot_map` is handed to the
+    tracker only here, so deleting that one argument disarms the guard for
+    the whole product while every unit test around it still passes.
+
+    The mis-attribution is measured on both sides of the deal, so the
+    banner is pinned against a real failure. The withheld reason is the
+    RESTART one and not "no nomination data", which is where this rule
+    sits in the fail-closed order: ahead of all seven that came before it,
+    because each of those is bounded to one lot, one feed or one figure
+    while this describes the whole board.
+    """
+    transport = _live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS)
+    server = CapturingServer()
+
+    code = main(
+        _live_args(tmp_path, _keeper_sheet(tmp_path)),
+        server=server,
+        out=io.StringIO(),
+        http_get=transport,
+    )
+
+    assert code == 0
+    before = server.poller.step()
+    assert before["me"]["slot"] == 7  # placeholder seat: roster 7 at slot 7
+    assert [entry["player_id"] for entry in before["me"]["roster"]] == [
+        "KP",
+        "K2",
+        "K3",
+    ]
+    assert not _stale_map_banners(before)
+    assert before["nomination"]["verdict_reason"] == "no nomination data"
+
+    # The commissioner deals the order while the dashboard is up.
+    transport.payloads[f"/draft/{DRAFT_ID}"]["slot_to_roster_id"] = {
+        str(slot): roster_id for slot, roster_id in PERMUTED_SLOTS.items()
+    }
+
+    after = server.poller.step()
+    assert after["me"]["slot"] == MY_DRAFT_SLOT  # roster 7 now drafts from slot 4
+    assert after["me"]["roster"] == []  # my keepers still hang on slot 7
+    (stale,) = _stale_map_banners(after)
+    assert "RESTART" in stale["actual"]
+    assert after["nomination"]["verdict"] is None
+    assert "RESTART" in after["nomination"]["verdict_reason"]
+
+
+def test_cli_rejects_malformed_budget_overrides():
+    """Every rejection is a clear message and exit 2, never a traceback and
+    never a silently-dropped flag — a budget the operator believes he set
+    but which never landed is the same wrong number this flag exists to
+    prevent. Checked before the network, so a typo fails instantly."""
+    server = CapturingServer()
+    for bad, expected in (
+        ("7", "SLOT=AMOUNT"),  # no separator
+        ("=96", "SLOT=AMOUNT"),  # no slot
+        ("7=", "SLOT=AMOUNT"),  # no amount
+        ("seven=96", "whole numbers"),
+        ("7=ninety", "whole numbers"),
+        ("7=96.5", "whole numbers"),
+        ("99=96", "1-12"),  # slot outside the league
+        ("0=96", "1-12"),
+        ("7=-5", "$0 and $200"),  # negative money
+        ("7=250", "$0 and $200"),  # above the league budget
+    ):
+        out = io.StringIO()
+        code = main(
+            ["--replay", str(FIXTURE), "--budget", bad, "--config", str(CONFIG)],
+            server=server,
+            out=out,
+        )
+        assert code == 2, f"--budget {bad} was accepted"
+        assert "--budget" in out.getvalue()
+        assert expected in out.getvalue(), f"--budget {bad}: {out.getvalue()}"
+    assert server.app is None  # no bad run reached the server
+
+
+def test_cli_rejects_the_same_slot_keyed_twice():
+    """Two amounts for one slot is a typo with a silent loser; guessing
+    which one the operator meant is exactly the confident-wrong-number
+    failure this work exists to stop."""
+    server = CapturingServer()
+    out = io.StringIO()
+
+    code = main(
+        [
+            "--replay",
+            str(FIXTURE),
+            "--budget",
+            "7=96",
+            "--budget",
+            "7=100",
+            "--config",
+            str(CONFIG),
+        ],
+        server=server,
+        out=out,
+    )
+
+    assert code == 2
+    assert "slot 7" in out.getvalue()
+    assert server.app is None
 
 
 def test_cli_exits_2_on_missing_config_or_fixture(tmp_path):

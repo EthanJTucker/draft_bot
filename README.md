@@ -205,8 +205,9 @@ PASS), profit as price-minus-value centered at $0, and the last-of-tier
 warning. Below it: the sortable/filterable positional table of remaining
 players, every team's budget as remaining dollars (never spent) with open
 slots and max possible bid, and my roster and remaining budget pinned.
-Fail-closed rendering: an untrusted picks feed, a cache-served draft
-object, a paused draft, or a lot with no recorded high bid shows a banner
+Fail-closed rendering: a draft order dealt after startup, an untrusted
+picks feed, a cache-served draft object, a paused draft, a lot with no
+recorded high bid, or a budget nobody entered for my slot shows a banner
 or reason and suppresses the verdict; any poll failure (source outage or
 processing error) keeps serving the last good state labeled as such; and
 a nomination pointer naming a just-sold player is priced against the
@@ -228,5 +229,110 @@ silently wrong) unless `--allow-no-keepers` says the league truly kept no
 one. Options: `--config`, `--cache-dir`, `--host`, `--port`,
 `--interval`, `--accelerate`, `--my-slot` (defaults to the config's
 roster id resolved against the draft; an out-of-range slot is rejected at
-startup), `--allow-no-keepers`. Exit codes: 0 served and shut down
-cleanly, 2 nothing ran.
+startup), `--allow-no-keepers`, `--budget`. Exit codes: 0 served and shut
+down cleanly, 2 nothing ran.
+
+Per-team budgets are the one number Sleeper may not give you. It carries
+them only as `draft.settings.budget_<slot>`, which exist only once the
+commissioner enters each team's post-keeper money; until then every team
+reads at the league-wide default, which on a keeper board overstates the
+whole room and never converges (remaining is budget minus spend, so a
+wrong budget stays wrong to the last lot). Any slot in that state is
+marked, and my own defaulted budget suppresses the verdict rather than
+advising off a number the tool made up. `--budget SLOT=AMOUNT` keys the
+real figures by hand from the league sheet, repeatably
+(`--budget 4=96 --budget 11=143`). AMOUNT is the team's post-keeper money
+for the whole draft, the same quantity `budget_<slot>` carries, not a
+running balance.
+
+SLOT is the **draft slot**, which is not the roster id. Sleeper assigns
+draft order at draft time and the two identifiers then differ: every
+completed season in this league maps them differently. The My-team panel
+names my draft slot, the team table's first column is the draft slot, and
+startup echoes every override it parsed. If overrides are given while my
+own resolved slot still has real money from neither source, startup says
+so and names the slot to use.
+
+That check needs the order to exist. Launch before the commissioner deals
+it — the likely case, since the order is assigned at draft time — and the
+draft still carries the placeholder map, slot N = roster N. Startup then
+says only that, because both of its answers would be wrong on a
+placeholder: a flag keyed to my roster id matches it and gets a clean
+bill, and the correct flag for my eventual slot gets told to re-key
+itself onto an opponent's row. The page applies the same test, from the
+same shared predicate, so it cannot give on a standing banner either of
+the two answers startup refuses to print. While the map is still the
+placeholder the page raises a banner that names no flag at all: the order
+is not dealt, so none of the overrides is checked. That is not a clean
+bill, and it clears itself the moment the order lands. From there the
+full check takes over: my slot is re-resolved every poll, and a standing
+banner names the flag to type whenever overrides were given and my own
+money is still the default. An explicit `--my-slot` is exempt from the
+placeholder rule on both surfaces, because that number came from me and
+not from the map.
+
+Keeper lists are the other thing that order moves. They arrive from the
+rosters keyed by roster id and are bridged onto draft slots exactly once,
+at startup, through whatever map the draft carried then; nothing
+re-fetches the rosters afterwards. So a dashboard launched before the
+order is dealt is bridged against the placeholder, and when the real
+order lands that bridge still describes the old seating while my own slot
+re-resolves correctly from the live board. The keeper counts stay on the
+seats the old order gave them, so the page raises a banner naming the
+slots that moved and stops advising. It also marks the figures built on
+that seating rather than leaving them to read as facts: my max bid, my
+remaining money, my caps line and my roster list all go amber, and three
+of those carry the words `OLD DRAFT ORDER — RESTART` — the sub-line under
+the max bid, the caps line itself, and a note above the roster. My
+remaining money goes amber with no wording of its own, and reads against
+those three. The money in them is real, so this is not
+the budget wording; what moved is the seating behind it. **The remedy is
+a restart**, which rebuilds the bridge against the order now in force.
+Launching after the order is dealt never reaches this, and neither does
+a board carrying no keepers at all: an empty bridge has nothing to fall
+behind, and every figure on such a board is slot-keyed anyway.
+
+Leave `--my-slot` alone unless the map cannot answer for itself. It is a
+replay and debugging convenience, not a way to get ahead of the draft
+order: asserting a slot the map has not dealt does not seat you there,
+and the roster arithmetic behind it — open slots, needs, max bid — then
+describes a seat nobody has been given yet, quietly and with no banner.
+The default resolves the slot from the config's roster id against the
+live map, which is the number that will be true.
+
+Precedence: an explicit `--budget` beats a live `budget_<slot>` key,
+which beats the `[auction] budget` default. Operator input outranks
+remote data because the case this lever exists for is a commissioner who
+enters the flat league budget for twelve keeper teams: every key is
+present, nothing is flagged, and every number is still fiction. Under the
+other ordering there is no lever at all. Replacing a figure Sleeper
+actually supplied is never silent, though: a standing banner names the
+slot and both amounts.
+
+Money a keeper roster provably cannot have left over gets its own banner,
+whoever entered it. Keeper cost has a floor, so a slot holding three
+keepers cannot carry more than $185 of post-keeper money, and a $200
+there is wrong rather than merely unentered — including in the flat
+league-budget room above, where nothing else fires. The banner names the
+source, and it leaves alone any slot the missing-budget banner already
+names: that is one hole, and reporting it twice is how a banner becomes
+wallpaper.
+
+The banner is not the only signal, because that money has a real
+provenance and every mark on the page would otherwise read it as
+correct. The slots it names ride the snapshot too, so the same board
+cannot say "this cannot be true" in a banner while painting the figure
+in confident green: those rows carry a `!`, my max bid goes amber and
+reads `(room IMPOSSIBLE)`, and if the slot is mine my own money and cap
+go amber and say so. The verdict is deliberately left alone. The budget
+came from a real key, so the call still renders; marking a figure and
+blanking the tool are different remedies and this is the marking one.
+
+The verdict suppression is per-slot on purpose. Keying my own slot
+restores my verdict even while the rest of the room is uncovered, because
+a tool that blanks for all 180 lots would be worse than one that shows a
+labeled figure. That narrowness has a cost, and the page shows it: my max
+bid is computed from all twelve budgets (inflation and the pace pool both
+read the whole room), so it renders amber and reads `(room default)` for
+as long as any keeper team's money is still fabricated, even after my own
+verdict has come back.

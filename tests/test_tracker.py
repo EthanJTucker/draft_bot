@@ -19,6 +19,12 @@ from draftbot.tracker import (
 
 from .conftest import raw_auction_pick
 
+# The map a draft carries before its order is dealt (slot N = roster N),
+# and the permuted one this league deals over it. Two different maps are
+# what the keeper bridge falls behind.
+_PLACEHOLDER_SLOTS = {slot: slot for slot in range(1, 13)}
+_DEALT_SLOTS = {**_PLACEHOLDER_SLOTS, 4: 7, 7: 11, 11: 4}
+
 
 def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
     # draft-object field a test needs to vary; a builder object adds nothing.
@@ -29,6 +35,7 @@ def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
     status: str = "drafting",
     draft_type: str = "auction",
     stale: frozenset[str] = frozenset(),
+    slots: dict[int, int] | None = None,
 ) -> SourceTick:
     raw_draft = {
         "draft_id": "1389692302259138561",
@@ -36,7 +43,10 @@ def _tick(  # pylint: disable=too-many-arguments  # one keyword knob per
         "type": draft_type,
         "settings": {"budget": 200, "teams": 12} | (settings or {}),
         "metadata": metadata or {},
-        "slot_to_roster_id": {str(slot): slot for slot in range(1, 13)},
+        "slot_to_roster_id": {
+            str(slot): roster_id
+            for slot, roster_id in (slots or _PLACEHOLDER_SLOTS).items()
+        },
     }
     return SourceTick(
         draft=parse_draft(raw_draft),
@@ -99,6 +109,228 @@ def test_budgets_seed_from_budget_slot_and_fall_back_to_config_default(config):
     assert defaulted.budget == 200
     assert defaulted.budget_is_default is True
     assert defaulted.open_slots == 15  # no keepers known, nothing bought
+
+
+def test_manual_budget_override_fills_a_slot_sleeper_never_carried(config):
+    """The operator's `--budget SLOT=AMOUNT` lever, keyed from the league
+    sheet when the commissioner never enters budget_<slot>.
+
+    Anti-cheat on all three sides at once: slot 5 is overridden and must
+    report the OVERRIDE ($96, not the $200 default and not defaulted),
+    slot 4 is untouched and must still report the default AND still be
+    labeled defaulted (a blanket clear of the flag fails here), and the
+    override must move the real spendable numbers, not just the flag —
+    $96 across 15 open slots is a max bid of $82, where the default
+    would say $186."""
+    tracker = DraftTracker(config, budget_overrides={5: 96})
+    board = tracker.update(_tick())
+
+    overridden = board.team(5)
+    assert overridden.budget == 96
+    assert overridden.budget_is_default is False
+    assert overridden.remaining == 96
+    assert overridden.max_bid == 82  # 96 - 14 held for the other open slots
+
+    untouched = board.team(4)
+    assert untouched.budget == 200
+    assert untouched.budget_is_default is True
+    assert untouched.max_bid == 186
+
+
+def test_keeper_budget_banner_counts_an_override_as_covered(config):
+    """The banner names the money the page is SHOWING. An overridden slot
+    shows a real number, so listing it under 'shown at the $200 default'
+    would be a false statement next to a correct figure — while a keeper
+    slot covered by neither source keeps the banner up for the room."""
+    keepers = {3: ("K1",), 5: ("K2",)}
+    both_missing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    (warning,) = [
+        w for w in both_missing.settings_warnings if w.field == "keeper_budgets"
+    ]
+    assert "slots 3, 5" in str(warning.actual)
+
+    one_covered = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 96}
+    ).update(_tick())
+    (warning,) = [
+        w for w in one_covered.settings_warnings if w.field == "keeper_budgets"
+    ]
+    assert "1 keeper team(s) (slots 3)" in str(warning.actual)
+
+    all_covered = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={3: 143, 5: 96}
+    ).update(_tick())
+    assert not [w for w in all_covered.settings_warnings if w.field == "keeper_budgets"]
+
+
+def test_a_manual_override_outranks_a_sleeper_budget_key(config):
+    """Precedence, pinned — and DELIBERATELY REVERSED from what this test
+    asserted when it was first written.
+
+    It used to pin Sleeper-first: a live budget_<slot> key beat a
+    hand-keyed override, on the reasoning that server data is fresher
+    than a number typed at the command line. That reasoning does not
+    survive the case the lever exists for. A commissioner who enters the
+    flat league budget for twelve keeper teams produces twelve real keys
+    carrying fiction: nothing is flagged, budget_is_default reads False
+    everywhere, and under Sleeper-first the operator's override is
+    discarded silently, leaving him no lever at all. The recoverable
+    direction is the other one — a stale override costs a few dollars on
+    one team and the operator can drop the flag.
+
+    So: explicit operator input, then the remote value, then the default.
+    $96 here, not $143. The discard raises its own banner (pinned in
+    test_an_override_that_discards_a_real_budget_says_so), so trading the
+    invisible remote failure for an invisible local one is ruled out."""
+    tracker = DraftTracker(config, budget_overrides={5: 96})
+    board = tracker.update(_tick(settings={"budget_5": 143}))
+
+    team = board.team(5)
+    assert team.budget == 96
+    assert team.budget_is_default is False
+    # The untouched slots still read the key Sleeper carries for them.
+    assert tracker.update(_tick(settings={"budget_4": 143})).team(4).budget == 143
+
+
+def test_an_override_that_discards_a_real_budget_says_so(config):
+    """The condition attached to the precedence flip. Filling a hole and
+    discarding real server data are different acts, and the operator has
+    to be able to tell them apart, so only the second raises a banner —
+    named by slot, carrying BOTH amounts so he can see what he replaced.
+
+    Anti-cheat: the equal case is not a discard. An override that agrees
+    with the key Sleeper carries changes nothing, and a banner there
+    would be noise the operator learns to ignore."""
+    keyed = DraftTracker(config, budget_overrides={5: 96}).update(
+        _tick(settings={"budget_5": 143})
+    )
+    (warning,) = [w for w in keyed.settings_warnings if w.field == "budget_override"]
+    assert "slot 5 = $96" in str(warning.expected)
+    assert "slot 5 = $143" in str(warning.actual)
+
+    hole = DraftTracker(config, budget_overrides={5: 96}).update(_tick())
+    assert not [w for w in hole.settings_warnings if w.field == "budget_override"]
+
+    agrees = DraftTracker(config, budget_overrides={5: 143}).update(
+        _tick(settings={"budget_5": 143})
+    )
+    assert not [w for w in agrees.settings_warnings if w.field == "budget_override"]
+
+
+def test_a_budget_a_keeper_roster_cannot_afford_raises_a_banner(config):
+    """`--budget 5=200` on a slot holding three keepers is not merely
+    unverified, it is provably impossible: keeper cost is bounded below
+    by the $5 floor, so three keepers leave at most $185 of post-keeper
+    money. Left unflagged it is the pre-fix wrong number ($200 where the
+    truth is at most $185) wearing the fix's all-clear — the banner it
+    would otherwise have raised is silenced by the override.
+
+    Anti-cheat on both boundaries: $185 is exactly reachable and must
+    stay quiet, and a keeper-free slot has no ceiling to breach at all,
+    so $200 there is unverified rather than wrong."""
+    keepers = {5: ("K1", "K2", "K3")}
+    over = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 200}
+    ).update(_tick())
+    (warning,) = [w for w in over.settings_warnings if w.field == "budget_ceiling"]
+    assert "slot 5 = $200" in str(warning.actual)
+    assert "$185" in str(warning.actual)
+    assert "hand-keyed with --budget" in str(warning.actual)
+
+    exact = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 185}
+    ).update(_tick())
+    assert not [w for w in exact.settings_warnings if w.field == "budget_ceiling"]
+
+    keeper_free = DraftTracker(config, budget_overrides={5: 200}).update(_tick())
+    assert not [w for w in keeper_free.settings_warnings if w.field == "budget_ceiling"]
+
+
+def test_the_ceiling_reads_sleepers_own_key_too_but_not_the_default(config):
+    """The silent variant the whole fail-closed budget rule exists for.
+
+    A commissioner who types a flat $200 into all twelve boxes leaves
+    every ``budget_<slot>`` key present, so ``budget_is_default`` reads
+    False, the keeper_budgets banner clears, and wrong money renders with
+    no mark at all. The same impossible figure typed as `--budget 5=200`
+    raises a banner. Same money, same board, opposite signal — so the
+    ceiling test runs on the RESOLVED per-slot budget and names where the
+    figure came from.
+
+    ANTI-CHEAT on the carve-out, both directions on ONE board. Slot 5
+    holds three keepers and carries a real $200 key: provably impossible,
+    banner. Slot 6 holds three keepers and carries NO key from either
+    source, so its resolved budget is the same $200 — and it must stay
+    out of this banner, because the keeper_budgets banner already names
+    it and double-reporting one hole as two faults is how a banner
+    becomes wallpaper. An implementation that simply prices every keeper
+    slot's resolved budget reports slot 6 as well and fails here."""
+    keepers = {5: ("K1", "K2", "K3"), 6: ("K4", "K5", "K6")}
+    board = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 200})
+    )
+
+    (warning,) = [w for w in board.settings_warnings if w.field == "budget_ceiling"]
+    assert "slot 5 = $200" in str(warning.actual)
+    assert "$185" in str(warning.actual)
+    assert "Sleeper's own key" in str(warning.actual)
+    assert "slot 6" not in str(warning.actual)
+    # Slot 6 is the uncovered one, and the standing banner that already
+    # owns it says so by slot.
+    (uncovered,) = [w for w in board.settings_warnings if w.field == "keeper_budgets"]
+    assert "slots 6" in str(uncovered.actual)
+
+    # Quiet case: nobody entered anything. Every keeper slot resolves to
+    # the $200 default, and the ceiling banner must stay silent on all of
+    # them — one hole, one banner.
+    nothing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    assert not [w for w in nothing.settings_warnings if w.field == "budget_ceiling"]
+
+    # Quiet case: real keys a keeper roster can actually afford.
+    real = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 185, "budget_6": 106})
+    )
+    assert not [w for w in real.settings_warnings if w.field == "budget_ceiling"]
+
+
+def test_the_impossible_slots_ride_the_board_with_the_banner(config):
+    """The banner proves a figure impossible; the board hands the page the
+    slots it named, so the proof can reach the marks.
+
+    Provenance alone cannot express this. A ceiling-breaching Sleeper key
+    IS a real key, so ``budget_is_default`` reads False and the page paints
+    the figure as confidently as any correct one — a board that says "this
+    cannot be true" in a banner while painting the same money green.
+
+    ANTI-CHEAT that this list is the banner's OWN set and not a
+    re-derivation. Slot 5 carries a real $200 key against a $185 ceiling
+    and is named. Slot 6 holds the same three keepers and resolves to the
+    same $200, but from the default, so the carve-out leaves it to the
+    keeper_budgets banner and it must NOT appear here. An implementation
+    that prices every keeper slot's resolved budget, or one that keys on
+    ``budget_is_default``, reports slot 6 and fails.
+
+    The provenance flag itself stays untouched on purpose: widening it
+    would suppress the verdict, and a tool that blanks is worse than one
+    that marks."""
+    keepers = {5: ("K1", "K2", "K3"), 6: ("K4", "K5", "K6")}
+    board = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 200})
+    )
+
+    assert board.impossible_keeper_slots == (5,)
+    (warning,) = [w for w in board.settings_warnings if w.field == "budget_ceiling"]
+    assert "slot 5" in str(warning.actual)
+    assert "slot 6" not in str(warning.actual)
+    assert board.team(5).budget_is_default is False
+
+    nothing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    assert not nothing.impossible_keeper_slots
+
+    affordable = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 185, "budget_6": 106})
+    )
+    assert not affordable.impossible_keeper_slots
 
 
 def test_nominee_in_the_sold_set_never_renders_live(config):
@@ -490,6 +722,43 @@ def test_pause_and_staleness_propagate_to_the_board(config):
     assert board.paused is True
     assert board.status == "drafting"
     assert board.stale_endpoints == frozenset({"picks"})
+
+
+def test_a_bridge_that_carries_no_keepers_has_nothing_to_fall_behind(config):
+    """The stale-bridge rule fires on a MIS-ATTRIBUTION, and a bridge that
+    carries no keeper at all attributes nothing.
+
+    Every figure that rule protects — roster panels, need counts, open
+    slots, the max bid behind them — is slot-keyed and recomputed each
+    tick on a keeper-free board, so the deal moves my slot and nothing
+    else. Blanking the tool there would cost the verdict and buy nothing.
+
+    Narrow but real: startup refuses a keeper league with zero keepers
+    unless ``--allow-no-keepers`` is passed, so this is the operator
+    waving that through because Sleeper's keeper data has not landed, and
+    then losing the verdict the moment the order deals.
+
+    ANTI-CHEAT: both trackers are bridged against the same placeholder and
+    fed the same dealt map, so the ONLY difference is whether anything was
+    bridged. An implementation that stopped comparing the maps, or that
+    read ``keepers_by_slot``'s KEYS (both trackers have twelve) rather
+    than its values, passes the first assert and fails the second.
+    """
+    dealt = _tick(slots=_DEALT_SLOTS)
+    empty = DraftTracker(
+        config,
+        keepers_by_slot={slot: () for slot in _PLACEHOLDER_SLOTS},
+        keeper_slot_map=_PLACEHOLDER_SLOTS,
+    )
+    kept = DraftTracker(
+        config,
+        keepers_by_slot={slot: () for slot in _PLACEHOLDER_SLOTS} | {7: ("KP",)},
+        keeper_slot_map=_PLACEHOLDER_SLOTS,
+    )
+
+    assert empty.update(dealt).keeper_map_stale is False
+    assert not empty.update(dealt).settings_warnings
+    assert kept.update(dealt).keeper_map_stale is True
 
 
 def test_keepers_by_slot_derives_from_rosters_through_the_slot_map():
