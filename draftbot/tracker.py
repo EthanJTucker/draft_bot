@@ -32,6 +32,13 @@ NOMINATION_UNTRUSTED = "untrusted"
 
 FLEX_ELIGIBLE = ("RB", "WR", "TE")
 
+# Where a team's budget came from, in precedence order. These strings are
+# printed in the settings banner: the same impossible figure must not be
+# blamed on the ``--budget`` flag when Sleeper supplied it.
+BUDGET_FROM_OVERRIDE = "hand-keyed with --budget"
+BUDGET_FROM_SLEEPER = "Sleeper's own key"
+BUDGET_FROM_DEFAULT = "the league-wide default"
+
 
 @dataclass(frozen=True)
 class TeamState:
@@ -375,6 +382,24 @@ class DraftTracker:
             )
         ]
 
+    def _resolved_budget(self, slot: int, draft: DraftState) -> tuple[int, str]:
+        """One slot's budget and where it came from.
+
+        The single statement of the precedence: explicit operator input
+        first, then the remote value, and ONLY then the league-wide
+        default — which is a fiction on a keeper board, so the provenance
+        travels with the number rather than being re-derived by each
+        caller. ``TeamState.budget_is_default`` and the ceiling banner
+        both read this, and a page that marks a figure the banner does
+        not name (or the reverse) is exactly the disagreement that keeps
+        them in one place.
+        """
+        if slot in self._budget_overrides:
+            return self._budget_overrides[slot], BUDGET_FROM_OVERRIDE
+        if slot in draft.budget_by_slot:
+            return draft.budget_by_slot[slot], BUDGET_FROM_SLEEPER
+        return self._config.auction_budget, BUDGET_FROM_DEFAULT
+
     def _ceiling_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
         """The IMPOSSIBLE banner: a keeper team's budget above what its
         roster can possibly leave is provably wrong, not merely
@@ -404,20 +429,15 @@ class DraftTracker:
         floor = self._config.keeper_cost_floor
         uncovered = set(self.uncovered_keeper_slots(draft))
         impossible = []
-        for slot in sorted(self._keepers_by_slot):
-            keepers = self._keepers_by_slot[slot]
-            if not keepers or slot in uncovered:
+        for slot, keepers in sorted(self._keepers_by_slot.items()):
+            if not keepers:
                 continue
-            if slot in self._budget_overrides:
-                amount = self._budget_overrides[slot]
-                source = "hand-keyed with --budget"
-            else:
-                amount = draft.budget_by_slot.get(slot)
-                source = "Sleeper's own key"
-            if amount is None:
-                # Unreachable while `uncovered` means what it says; kept
-                # so a later edit there degrades to silence, not a crash
-                # in the poll thread.
+            amount, source = self._resolved_budget(slot, draft)
+            if slot in uncovered:
+                # THE CARVE-OUT. This slot's money is the league default,
+                # which breaches the ceiling on any keeper roster — but
+                # the keeper_budgets banner already names it, by slot.
+                # One hole, one banner.
                 continue
             ceiling = self._config.auction_budget - floor * len(keepers)
             if amount > ceiling:
@@ -476,15 +496,12 @@ class DraftTracker:
     def _team_state(self, slot: int, tick: SourceTick) -> TeamState:
         purchases = [pick for pick in tick.picks if pick.draft_slot == slot]
         keepers = self._keepers_by_slot.get(slot, ())
-        # Explicit operator input first, then the remote value, and ONLY
-        # then the league-wide default — which is a fiction on a keeper
-        # board, so the flag it raises must survive all the way to the
-        # page and the verdict. An override that merely fills a hole is
-        # the ordinary case; one that discards a real budget_<slot> is
-        # named by slot in the standing settings banner.
-        budget = self._budget_overrides.get(slot)
-        if budget is None:
-            budget = tick.draft.budget_by_slot.get(slot)
+        # The default is a fiction on a keeper board, so the flag it
+        # raises must survive all the way to the page and the verdict.
+        # An override that merely fills a hole is the ordinary case; one
+        # that discards a real budget_<slot> is named by slot in the
+        # standing settings banner.
+        budget, source = self._resolved_budget(slot, tick.draft)
         open_slots = max(0, self._config.drafted_slots - len(keepers) - len(purchases))
         positions = [self._player_positions.get(player_id) for player_id in keepers]
         positions.extend(
@@ -494,8 +511,8 @@ class DraftTracker:
         return TeamState(
             slot=slot,
             roster_id=tick.draft.slot_to_roster_id.get(slot),
-            budget=self._config.auction_budget if budget is None else budget,
-            budget_is_default=budget is None,
+            budget=budget,
+            budget_is_default=source == BUDGET_FROM_DEFAULT,
             spent=sum(pick.amount or 0 for pick in purchases),
             keeper_count=len(keepers),
             purchase_count=len(purchases),
