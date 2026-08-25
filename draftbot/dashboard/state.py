@@ -36,11 +36,15 @@ from draftbot.valuation import SheetRow
 
 def _verdict(  # pylint: disable=too-many-return-statements  # one return
     # per fail-closed rule keeps each suppression reason on its own line.
+    # pylint: disable=too-many-arguments  # one parameter per input a
+    # suppression rule reads; bundling them would only hide the count.
     status: str,
     paused: bool,
     high_bid: int | None,
     analysis: dict | None,
     error: str | None,
+    *,
+    budget_is_default: bool = False,
 ) -> tuple[dict | None, str]:
     """The plain BID/PASS call, deliberately simple (nuance is the
     engine's job): BID exactly when the current high bid is BELOW my max
@@ -48,10 +52,21 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
 
     Fail-closed by rule: no verdict on a paused draft, an untrusted picks
     feed, a stale (beyond-grace) pointer, a lot the engine could not
-    price, or a lot with no recorded high bid (an open lot always carries
+    price, a lot with no recorded high bid (an open lot always carries
     one; its absence is suspect data, and a fabricated $0 offer would
-    scream BID). A just-sold lot (within grace) keeps its verdict as the
-    retrospective call the bot was making when the hammer fell.
+    scream BID), or a MY-BUDGET figure that is the league-wide default
+    rather than a real one. A just-sold lot (within grace) keeps its
+    verdict as the retrospective call the bot was making when the hammer
+    fell.
+
+    The budget rule is deliberately narrow, and the narrowness is the
+    point. It reads MY slot only, and it clears as soon as that slot
+    carries real money from either source (a Sleeper key or the
+    operator's ``--budget`` override). Suppressing on any defaulted slot
+    in the room would blank the tool for every lot of a draft whose
+    commissioner never enters budgets — no tool at all, which is worse
+    than a labeled one. The room's other defaulted slots stay visible as
+    the standing settings banner and the per-team flag.
     """
     if paused:
         return None, "draft paused"
@@ -65,6 +80,12 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
         return None, error or "no analysis"
     if high_bid is None:
         return None, "no recorded high bid for this lot; not advising on suspect data"
+    if budget_is_default:
+        return None, (
+            "my budget is the league-wide default, not a real one "
+            "(Sleeper carries no budget_<slot> for my slot); pass "
+            "--budget SLOT=AMOUNT to advise"
+        )
     action = "BID" if high_bid < analysis["max_bid"] else "PASS"
     label = "final" if status == NOMINATION_SOLD_GRACE else "live"
     return {
@@ -223,7 +244,12 @@ class DashboardPoller:
         player_id = nomination.player_id
         analysis, pre_sale, error = self._analysis_for(board, my_slot)
         verdict, reason = _verdict(
-            nomination.status, board.paused, nomination.highest_offer, analysis, error
+            nomination.status,
+            board.paused,
+            nomination.highest_offer,
+            analysis,
+            error,
+            budget_is_default=self._budget_is_default(board, my_slot),
         )
         if verdict is not None and "draft" in board.stale_endpoints:
             # The draft object is the ONLY carrier of the nomination
@@ -259,6 +285,19 @@ class DashboardPoller:
             "profit": profit,
             "last_of_tier": bool(tier and tier["last_of_tier"]),
         }
+
+    def _budget_is_default(self, board: BoardState, my_slot: int | None) -> bool:
+        """Whether MY money on this board is the league-wide default
+        rather than a real budget.
+
+        An unresolved slot reads False on purpose: that board cannot be
+        priced at all, so the analysis rule has already suppressed the
+        verdict with the more specific reason, and claiming a budget
+        problem on top of it would be a second, wrong explanation.
+        """
+        if my_slot is None:
+            return False
+        return board.team(my_slot).budget_is_default
 
     def _analysis_for(
         self, board: BoardState, my_slot: int | None
@@ -409,6 +448,9 @@ class DashboardPoller:
             "remaining": me.remaining,
             "open_slots": me.open_slots,
             "max_bid": me.max_bid,
+            # Every figure above is budget minus spend, so a defaulted
+            # budget makes all of them a guess. The page marks them.
+            "budget_is_default": me.budget_is_default,
             "needs": {label: count for label, count in me.needs.items() if count},
             "roster": roster,
         }

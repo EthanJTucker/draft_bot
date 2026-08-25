@@ -127,6 +127,32 @@ def test_manual_budget_override_fills_a_slot_sleeper_never_carried(config):
     assert untouched.max_bid == 186
 
 
+def test_keeper_budget_banner_counts_an_override_as_covered(config):
+    """The banner names the money the page is SHOWING. An overridden slot
+    shows a real number, so listing it under 'shown at the $200 default'
+    would be a false statement next to a correct figure — while a keeper
+    slot covered by neither source keeps the banner up for the room."""
+    keepers = {3: ("K1",), 5: ("K2",)}
+    both_missing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    (warning,) = [
+        w for w in both_missing.settings_warnings if w.field == "keeper_budgets"
+    ]
+    assert "slots 3, 5" in str(warning.actual)
+
+    one_covered = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={5: 96}
+    ).update(_tick())
+    (warning,) = [
+        w for w in one_covered.settings_warnings if w.field == "keeper_budgets"
+    ]
+    assert "1 keeper team(s) (slots 3)" in str(warning.actual)
+
+    all_covered = DraftTracker(
+        config, keepers_by_slot=keepers, budget_overrides={3: 143, 5: 96}
+    ).update(_tick())
+    assert not [w for w in all_covered.settings_warnings if w.field == "keeper_budgets"]
+
+
 def test_sleeper_budget_key_outranks_a_manual_override(config):
     """Precedence, pinned: once the commissioner enters budget_<slot> the
     live draft object is authoritative and a stale hand-keyed override

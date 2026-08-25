@@ -13,7 +13,7 @@ from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.tracker import DraftTracker
 
 from .conftest import raw_auction_pick
-from .helpers_dashboard import make_poller, make_tick, team_by_slot
+from .helpers_dashboard import ENTERED_BUDGETS, make_poller, make_tick, team_by_slot
 from .helpers_engine import sheet_row
 
 
@@ -73,8 +73,18 @@ def test_new_nomination_is_visible_in_the_next_snapshot(config):
         sheet_row(3, "C", "QB", 11.0),
     ]
     entries = [
-        make_tick(),
-        make_tick(nominee="B", offer=5, nominating_slot=2, offering_slot=4),
+        # MOVED for the budget rule: this test is about latency, not about
+        # budget provenance, so its board carries entered budgets. Without
+        # them the verdict is correctly withheld and the latency claim
+        # could not be made at all.
+        make_tick(budgets=ENTERED_BUDGETS),
+        make_tick(
+            nominee="B",
+            offer=5,
+            nominating_slot=2,
+            offering_slot=4,
+            budgets=ENTERED_BUDGETS,
+        ),
     ]
     poller = make_poller(config, entries, rows)
 
@@ -109,7 +119,10 @@ def test_bid_only_below_max_bid_equality_is_pass(config):
     ]
 
     def nomination_at(offer):
-        entries = [make_tick(nominee="B", offer=offer)]
+        # MOVED for the budget rule: the boundary being probed is
+        # high_bid vs max_bid, so the board carries entered budgets. The
+        # $200 figure is unchanged — only its provenance is.
+        entries = [make_tick(nominee="B", offer=offer, budgets=ENTERED_BUDGETS)]
         return make_poller(config, entries, rows).step()["nomination"]
 
     # The engine's max bid is a function of the board, not the offer, so
@@ -180,7 +193,13 @@ def test_stale_draft_endpoint_never_carries_a_verdict(config):
         sheet_row(2, "B", "WR", 20.0),
         sheet_row(3, "C", "QB", 11.0),
     ]
-    entries = [make_tick(nominee="B", offer=1, stale=("draft",))]
+    # MOVED for the budget rule: entered budgets, so the ONLY reason this
+    # verdict can be withheld is the cached draft object. On a guessed
+    # board the budget rule would suppress first and this test would pass
+    # while proving nothing about the cache guard.
+    entries = [
+        make_tick(nominee="B", offer=1, stale=("draft",), budgets=ENTERED_BUDGETS)
+    ]
     state = make_poller(config, entries, rows).step()
 
     nomination = state["nomination"]
@@ -391,8 +410,17 @@ def test_keeper_wired_poller_prices_and_renders_the_keeper_board(config):
         sheet_row(2, "B", "WR", 20.0),
         sheet_row(3, "C", "QB", 11.0),
     ]
-    entries = [make_tick(nominee="B", offer=5)]
-    state = make_poller(config, entries, rows, keepers_by_slot={7: ("KP",)}).step()
+    # MOVED for the budget rule, in two coupled ways, because this
+    # fixture asserts BOTH a verdict and the pre-entry keeper banner and
+    # those now pull apart. My slot 7 gets a real budget_<slot> key, so
+    # the verdict assert below still means what it meant. Slot 3 is a
+    # second keeper team left uncovered, so the banner assert below
+    # still means what IT meant: the room is not fully entered. Its
+    # keeper is off the value sheet, so the buyable table is unchanged.
+    keepers = {7: ("KP",), 3: ("OFFSHEET",)}
+    budgets = {slot: 200 for slot in range(1, 13) if slot != 3}
+    entries = [make_tick(nominee="B", offer=5, budgets=budgets)]
+    state = make_poller(config, entries, rows, keepers_by_slot=keepers).step()
 
     assert [player["player_id"] for player in state["players"]] == ["B", "C"]
     me = state["me"]
@@ -431,9 +459,10 @@ def _keeper_board_rows():
     ]
 
 
-def _keeper_board_poller(config, rows, *, overrides=None):
-    """The 2026 shape: three keepers on my slot 7 and a board where
-    Sleeper carries NO budget_<slot> key for anyone."""
+def _keeper_board_poller(config, rows, *, overrides=None, budgets=None):
+    """The 2026 shape: three keepers on my slot 7 and, unless ``budgets``
+    says otherwise, a board where Sleeper carries NO budget_<slot> key
+    for anyone."""
     tracker = DraftTracker(
         config,
         keepers_by_slot={7: ("K1", "K2", "K3")},
@@ -442,7 +471,7 @@ def _keeper_board_poller(config, rows, *, overrides=None):
     )
     return make_poller(
         config,
-        [make_tick(nominee="B", offer=5)],
+        [make_tick(nominee="B", offer=5, budgets=budgets)],
         rows,
         keepers_by_slot={7: ("K1", "K2", "K3")},
         tracker=tracker,
@@ -479,6 +508,50 @@ def test_budget_override_moves_my_real_dollars_not_merely_the_flag(config):
     assert team_by_slot(overridden, 3)["budget_is_default"] is True
 
 
+def test_verdict_is_suppressed_only_while_my_budget_is_a_guess(config):
+    """The sixth fail-closed rule, and its deliberate limit.
+
+    A BID/PASS call computed off a made-up budget is a confident wrong
+    answer, so a defaulted budget suppresses the verdict. But suppressing
+    unconditionally would blank the tool for the whole draft whenever the
+    commissioner never enters budgets — trading a wrong number for no
+    tool at all, which is worse. So the rule clears the moment my slot
+    carries a REAL budget, from either source: a hand-keyed override, or
+    a budget_<slot> key the commissioner finally entered.
+
+    All three boards here are otherwise identical and priceable — live
+    nomination, a recorded high bid, an unpaused draft — so nothing but
+    the budget can explain the difference."""
+    rows = _keeper_board_rows()
+
+    guessed = _keeper_board_poller(config, rows).step()["nomination"]
+    assert guessed["analysis"] is not None  # priced; only the CALL is withheld
+    assert guessed["verdict"] is None
+    assert "budget" in guessed["verdict_reason"]
+    assert "--budget" in guessed["verdict_reason"]
+
+    overridden = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    assert overridden["nomination"]["verdict"] is not None
+    assert overridden["nomination"]["verdict"]["action"] in {"BID", "PASS"}
+
+    entered = _keeper_board_poller(config, rows, budgets={7: 96}).step()
+    assert entered["nomination"]["verdict"] is not None
+    assert entered["me"]["remaining"] == 96
+
+
+def test_me_panel_marks_a_defaulted_budget_for_the_page(config):
+    """The 34px green number is the figure read under a bid timer, and
+    until now nothing in the `me` payload said it was a guess — the lone
+    signals were a `*` in the 12-row team table and a banner that fires
+    on every poll all night. The flag rides on `me` so the page can mark
+    the number itself."""
+    rows = _keeper_board_rows()
+
+    assert _keeper_board_poller(config, rows).step()["me"]["budget_is_default"] is True
+    overridden = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    assert overridden["me"]["budget_is_default"] is False
+
+
 def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
     """The static page binds these exact field names; any rename anywhere
     in the snapshot (players-row worth, settings_warnings field, roster
@@ -492,8 +565,19 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         sheet_row(3, "A", "WR", 19.0),
         sheet_row(4, "C", "QB", 11.0),
     ]
-    entries = [make_tick([raw_auction_pick(1, "A", 7, "19")], nominee="B", offer=5)]
-    state = make_poller(config, entries, rows, keepers_by_slot={7: ("KP",)}).step()
+    # MOVED for the budget rule (see the `me` key set below, which also
+    # moved): the fixture must stay rich in BOTH a verdict and a settings
+    # warning, and a defaulted budget now suppresses the verdict. So my
+    # slot 7 carries a real budget_<slot> key while slot 3 is a second,
+    # uncovered keeper team that keeps the warning firing.
+    keepers = {7: ("KP",), 3: ("OFFSHEET",)}
+    budgets = {slot: 200 for slot in range(1, 13) if slot != 3}
+    entries = [
+        make_tick(
+            [raw_auction_pick(1, "A", 7, "19")], nominee="B", offer=5, budgets=budgets
+        )
+    ]
+    state = make_poller(config, entries, rows, keepers_by_slot=keepers).step()
 
     assert set(state) == {
         "ok",
@@ -568,11 +652,17 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         "is_me",
     }
     me = state["me"]
+    # MOVED: `budget_is_default` is a deliberate addition to the /state
+    # contract. Every money figure in this panel is budget minus spend,
+    # so when the budget is the league default rather than a real one the
+    # page must be able to mark the numbers instead of rendering them at
+    # full confidence.
     assert set(me) == {
         "slot",
         "remaining",
         "open_slots",
         "max_bid",
+        "budget_is_default",
         "needs",
         "roster",
     }
@@ -641,10 +731,17 @@ def test_sold_nominee_is_priced_on_the_pre_sale_board(config):
         sheet_row(2, "B", "RB", 20.0),
         sheet_row(3, "C", "QB", 11.0),
     ]
+    # MOVED for the budget rule: the retrospective 'final' verdict is the
+    # claim under test, so this board carries entered budgets. The $200
+    # figure and every number below it are unchanged.
     sold_tick = make_tick(
-        [raw_auction_pick(1, "X", 7, "60")], nominee="X", offer=60, offering_slot=7
+        [raw_auction_pick(1, "X", 7, "60")],
+        nominee="X",
+        offer=60,
+        offering_slot=7,
+        budgets=ENTERED_BUDGETS,
     )
-    entries = [make_tick(), sold_tick, sold_tick]
+    entries = [make_tick(budgets=ENTERED_BUDGETS), sold_tick, sold_tick]
     poller = make_poller(config, entries, rows)
     poller.step()
 

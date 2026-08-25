@@ -12,6 +12,14 @@ from draftbot.models import parse_draft, parse_picks
 from draftbot.sources import SourceTick
 from draftbot.tracker import DraftTracker
 
+# The commissioner HAS entered every slot, at the league budget. Numerically
+# identical to leaving the keys out (the fallback is the same $200), but the
+# provenance differs, and the poller's budget rule reads the provenance: a
+# fixture that wants a BID/PASS verdict must carry real budgets, because a
+# figure the tool guessed cannot advise. Fixtures that mean to exercise the
+# GUESSED board leave budgets out.
+ENTERED_BUDGETS = {slot: 200 for slot in range(1, 13)}
+
 
 class ScriptedSource:
     """poll() serves scripted entries in order (the last one repeats);

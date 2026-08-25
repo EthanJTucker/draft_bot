@@ -288,16 +288,24 @@ class DraftTracker:
 
     def _settings_warnings(self, draft: DraftState) -> tuple[SettingsMismatch, ...]:
         """Assumption diffs, plus the pre-entry keeper condition: a keeper
-        team without its budget_<slot> key shows the config default, which
-        overstates what it can spend. The warning holds while ANY
-        keeper-holding slot is uncovered — the commissioner enters budgets
-        one team at a time, and the first entry must not clear the banner
-        for the rest of the room."""
+        team with no real budget from EITHER source shows the config
+        default, which overstates what it can spend. The warning holds
+        while ANY keeper-holding slot is uncovered — the commissioner
+        enters budgets one team at a time, and the first entry must not
+        clear the banner for the rest of the room.
+
+        A hand-keyed override covers its slot here exactly as a Sleeper
+        key does. This banner names the money the page is SHOWING, and an
+        overridden slot shows a real number; listing it anyway would put
+        'shown at the $200 default' on screen beside a correct figure.
+        """
         warnings = list(diff_settings(draft, self._expected_settings))
         missing = sorted(
             slot
             for slot, players in self._keepers_by_slot.items()
-            if players and slot not in draft.budget_by_slot
+            if players
+            and slot not in draft.budget_by_slot
+            and slot not in self._budget_overrides
         )
         if missing:
             warnings.append(
