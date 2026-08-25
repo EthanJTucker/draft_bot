@@ -121,6 +121,15 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # the default-budget asterisk carries its legend.
     assert "PAGE RENDER FAILED" in page
     assert "budget not entered on Sleeper yet" in page
+    # The defaulted-budget marks. PRESENCE only: no test in this suite
+    # executes the page's JavaScript, so this catches a deletion and
+    # nothing subtler. The rendering itself (amber on the my-team money,
+    # the caps line, and the max-bid cap line; plain when a budget is
+    # real) was checked in a browser against three boards.
+    assert "BUDGET NOT ENTERED" in page
+    assert "budget_is_default" in page
+    assert ".sub.guessed" in page
+    assert "#my-team .money.guessed" in page
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
