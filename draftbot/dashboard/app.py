@@ -19,6 +19,7 @@ import json
 import sys
 import threading
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TextIO
 
@@ -135,6 +136,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="my draft slot (default: resolved from the config's roster id)",
     )
     parser.add_argument(
+        "--budget",
+        action="append",
+        default=None,
+        metavar="SLOT=AMOUNT",
+        help="a team's REAL auction budget, keyed by hand from the league "
+        "sheet when the commissioner never entered budget_<slot> on "
+        "Sleeper (repeatable: --budget 7=96 --budget 3=143). Sleeper "
+        "wins where it carries a budget; a slot with neither shows the "
+        "league default, is marked on the page, and withholds my verdict",
+    )
+    parser.add_argument(
         "--allow-no-keepers",
         action="store_true",
         help="serve live mode even though this keeper league's rosters "
@@ -153,6 +165,65 @@ def _load_config_or_none(path: str, err: TextIO) -> LeagueConfig | None:
     except KeyError as error:
         print(f"error: config file {path} is missing required key {error}", file=err)
     return None
+
+
+def _parse_budget_overrides(
+    values: list[str] | None, config: LeagueConfig, err: TextIO
+) -> dict[int, int] | None:
+    """``--budget SLOT=AMOUNT`` occurrences as {slot: amount}, or None
+    after printing why one of them is unusable.
+
+    Every rejection is loud. A flag the operator believes he set but
+    which quietly failed to parse leaves exactly the wrong number this
+    whole lever exists to remove, so a malformed token stops startup
+    instead of being skipped. AMOUNT is a whole-draft budget, the same
+    quantity Sleeper's ``budget_<slot>`` carries and the same one the
+    config's ``[auction] budget`` supplies as a fallback — not a
+    remaining balance and not a per-bid cap.
+    """
+    overrides: dict[int, int] = {}
+    for raw in values or ():
+        slot_text, separator, amount_text = raw.partition("=")
+        if not separator or not slot_text or not amount_text:
+            print(
+                f"error: --budget {raw!r} is not SLOT=AMOUNT "
+                "(for example: --budget 7=96)",
+                file=err,
+            )
+            return None
+        try:
+            slot, amount = int(slot_text), int(amount_text)
+        except ValueError:
+            print(
+                f"error: --budget {raw!r} needs whole numbers on both "
+                "sides (for example: --budget 7=96)",
+                file=err,
+            )
+            return None
+        if not 1 <= slot <= config.teams:
+            print(
+                f"error: --budget {raw!r} names slot {slot}, outside this "
+                f"league's draft slots (1-{config.teams})",
+                file=err,
+            )
+            return None
+        if not 0 <= amount <= config.auction_budget:
+            print(
+                f"error: --budget {raw!r} sets ${amount}; a team's budget "
+                f"is between $0 and ${config.auction_budget} in this league",
+                file=err,
+            )
+            return None
+        if slot in overrides:
+            print(
+                f"error: --budget names slot {slot} twice (${overrides[slot]} "
+                f"and ${amount}); one of them is a typo, and guessing which "
+                "would put a wrong budget on the page",
+                file=err,
+            )
+            return None
+        overrides[slot] = amount
+    return overrides
 
 
 def _read_sheet_or_none(path: str, err: TextIO):
@@ -271,10 +342,21 @@ def main(
             file=err,
         )
         return 2
+    # Before the network: a typo in a budget must fail instantly, not
+    # after a live draft+rosters round trip.
+    budget_overrides = _parse_budget_overrides(args.budget, config, err)
+    if budget_overrides is None:
+        return 2
     runtime = _build_runtime(args, config, err, http_get=http_get)
     if runtime is None:
         return 2
-    poller = _wire_poller(runtime, config, my_slot=args.my_slot, note=_mode_note(args))
+    poller = _wire_poller(
+        runtime,
+        config,
+        my_slot=args.my_slot,
+        note=_mode_note(args),
+        budget_overrides=budget_overrides,
+    )
     app = create_app(poller)
     interval = args.interval / max(args.accelerate, 1e-9)
     print(
@@ -303,7 +385,12 @@ def _mode_note(args: argparse.Namespace) -> str | None:
 
 
 def _wire_poller(
-    runtime, config: LeagueConfig, *, my_slot: int | None, note: str | None = None
+    runtime,
+    config: LeagueConfig,
+    *,
+    my_slot: int | None,
+    note: str | None = None,
+    budget_overrides: Mapping[int, int] | None = None,
 ):
     """Tracker + poller over one runtime, wired consistently: the same
     keeper mapping feeds both (the tracker's keeper counts and the
@@ -316,6 +403,7 @@ def _wire_poller(
         player_positions={row.player_id: row.position for row in rows},
         expected_settings=default_expected_settings(config),
         value_sheet=value_map(rows),
+        budget_overrides=budget_overrides,
     )
     return DashboardPoller(
         source,

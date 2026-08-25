@@ -9,6 +9,8 @@ asymmetric sign, and boards that a fail-open renderer would misread.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from draftbot.sleeper_client import SleeperUnavailableError
 from draftbot.tracker import DraftTracker
 
@@ -550,6 +552,30 @@ def test_me_panel_marks_a_defaulted_budget_for_the_page(config):
     assert _keeper_board_poller(config, rows).step()["me"]["budget_is_default"] is True
     overridden = _keeper_board_poller(config, rows, overrides={7: 96}).step()
     assert overridden["me"]["budget_is_default"] is False
+
+
+def test_config_budget_lever_still_moves_the_money_but_not_the_verdict(config):
+    """The pre-existing whole-league lever, pinned on both sides.
+
+    Editing `[auction] budget` re-points the SAME fallback the tracker
+    has always used, so the money it produces is unchanged by this work:
+    $96 across my 12 open slots is still a cap of $85. What changed is
+    the verdict. That lever sets every team in the room to one number,
+    which is a fiction for the other eleven, and the flag stays True
+    because the figure is still a default rather than a real per-team
+    budget — so the BID/PASS call is now withheld and says so. Keying
+    --budget for my slot is what restores it."""
+    lever = replace(config, auction_budget=96)
+    rows = _keeper_board_rows()
+
+    state = _keeper_board_poller(lever, rows).step()
+
+    assert state["me"]["remaining"] == 96
+    assert state["me"]["max_bid"] == 85
+    assert state["nomination"]["analysis"]["my_cap"] == 85
+    assert state["me"]["budget_is_default"] is True
+    assert state["nomination"]["verdict"] is None
+    assert "--budget" in state["nomination"]["verdict_reason"]
 
 
 def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):

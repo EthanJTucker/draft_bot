@@ -23,6 +23,7 @@ from .helpers_dashboard import make_poller, make_tick
 from .helpers_engine import sheet_row
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
+CONFIG = REPO_ROOT / "league_config.toml"
 
 # The real config's draft id (tests use the checked-in league_config.toml).
 DRAFT_ID = "1389692302259138561"
@@ -343,6 +344,102 @@ def test_live_mode_wires_roster_keepers_into_the_board(tmp_path):
     keeper_entries = [entry for entry in me["roster"] if entry["keeper"]]
     assert [entry["player_id"] for entry in keeper_entries] == ["KP"]
     assert keeper_entries[0]["price"] is None  # kept, not bought
+
+
+def test_live_mode_budget_flag_puts_my_real_money_on_the_board(tmp_path):
+    """End to end through the CLI on the board this league will actually
+    show: Sleeper carries no budget_<slot> key for anyone (settings is
+    empty), and my slot 7 holds three keepers. Left alone the page reads
+    the $200 league default — $189 of max bid. `--budget 7=96` keys the
+    real number off the league sheet and the page reads $85.
+
+    The flag is repeatable, so slot 3 is set in the same run and must
+    land too, while every un-keyed slot stays honestly marked."""
+    rosters = [
+        {"roster_id": slot, "keepers": ["KP", "K2", "K3"] if slot == 7 else []}
+        for slot in range(1, 13)
+    ]
+    server = CapturingServer()
+
+    code = main(
+        _live_args(
+            tmp_path, _keeper_sheet(tmp_path), "--budget", "7=96", "--budget", "3=143"
+        ),
+        server=server,
+        out=io.StringIO(),
+        http_get=_live_transport(rosters),
+    )
+
+    assert code == 0
+    state = server.poller.step()
+    me = state["me"]
+    assert me["slot"] == 7
+    assert me["open_slots"] == 12  # 15 drafted slots minus three keepers
+    assert me["remaining"] == 96  # the real budget, not the $200 default
+    assert me["max_bid"] == 85  # 96 - 11 held; the default would say 189
+    assert me["budget_is_default"] is False
+    slots = {team["slot"]: team for team in state["teams"]}
+    assert slots[3]["remaining"] == 143
+    assert slots[3]["budget_is_default"] is False
+    assert slots[5]["remaining"] == 200
+    assert slots[5]["budget_is_default"] is True
+
+
+def test_cli_rejects_malformed_budget_overrides():
+    """Every rejection is a clear message and exit 2, never a traceback and
+    never a silently-dropped flag — a budget the operator believes he set
+    but which never landed is the same wrong number this flag exists to
+    prevent. Checked before the network, so a typo fails instantly."""
+    server = CapturingServer()
+    for bad, expected in (
+        ("7", "SLOT=AMOUNT"),  # no separator
+        ("=96", "SLOT=AMOUNT"),  # no slot
+        ("7=", "SLOT=AMOUNT"),  # no amount
+        ("seven=96", "whole numbers"),
+        ("7=ninety", "whole numbers"),
+        ("7=96.5", "whole numbers"),
+        ("99=96", "1-12"),  # slot outside the league
+        ("0=96", "1-12"),
+        ("7=-5", "$0 and $200"),  # negative money
+        ("7=250", "$0 and $200"),  # above the league budget
+    ):
+        out = io.StringIO()
+        code = main(
+            ["--replay", str(FIXTURE), "--budget", bad, "--config", str(CONFIG)],
+            server=server,
+            out=out,
+        )
+        assert code == 2, f"--budget {bad} was accepted"
+        assert "--budget" in out.getvalue()
+        assert expected in out.getvalue(), f"--budget {bad}: {out.getvalue()}"
+    assert server.app is None  # no bad run reached the server
+
+
+def test_cli_rejects_the_same_slot_keyed_twice():
+    """Two amounts for one slot is a typo with a silent loser; guessing
+    which one the operator meant is exactly the confident-wrong-number
+    failure this work exists to stop."""
+    server = CapturingServer()
+    out = io.StringIO()
+
+    code = main(
+        [
+            "--replay",
+            str(FIXTURE),
+            "--budget",
+            "7=96",
+            "--budget",
+            "7=100",
+            "--config",
+            str(CONFIG),
+        ],
+        server=server,
+        out=out,
+    )
+
+    assert code == 2
+    assert "slot 7" in out.getvalue()
+    assert server.app is None
 
 
 def test_cli_exits_2_on_missing_config_or_fixture(tmp_path):
