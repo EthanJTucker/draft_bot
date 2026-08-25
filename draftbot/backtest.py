@@ -93,18 +93,28 @@ _QUANTIZE_DECIMALS = 10
 # --- margin, so a stale loose bound that a broken engine could slip    ---
 # --- under is itself a test failure.                                   ---
 
-#: Running (inflation-adjusted) estimate, overall MAE: measured 5.5376
-#: over the 159 scored lots.
-RUNNING_MAE_BOUND = 6.5
-RUNNING_MAE_MARGIN = 1.0
+#: Running (inflation-adjusted) estimate, overall MAE: measured 2.2388
+#: over the 159 scored lots — the static sheet's own number to the last
+#: decimal, because ``INFLATION_MIN = 1.0`` binds at every scored sale
+#: moment of this fixture and the running estimate lands exactly on the
+#: sheet it adjusts. Bound and margin match the static pair for the same
+#: reason; they are separate metrics that coincide today, not aliases.
+RUNNING_MAE_BOUND = 2.75
+RUNNING_MAE_MARGIN = 0.6
 
-#: Running estimate, early/mid/late bias spread: measured 11.7962
-#: (segment bias -11.81 / -2.69 / -0.02). A REGRESSION PIN of a real,
-#: explained deflation drift — NOT a no-drift certificate; see the
-#: "Findings" section of the report before trusting the early-board
-#: running estimate on draft night.
-RUNNING_DRIFT_SPREAD_BOUND = 13.0
-RUNNING_DRIFT_SPREAD_MARGIN = 1.5
+#: Running estimate, early/mid/late bias spread: measured 1.9351 (segment
+#: bias -1.71 / +0.23 / +0.06). A no-systematic-drift assertion now, not
+#: the regression pin of a known deflation drift it used to be: the
+#: raised floor removed the drift rather than bounding it.
+RUNNING_DRIFT_SPREAD_BOUND = 2.5
+RUNNING_DRIFT_SPREAD_MARGIN = 0.75
+
+#: Running estimate, worst single-segment absolute bias: measured 1.7051
+#: (the early third). The symmetric replacement for the old
+#: ``early < mid < late`` shape assertion, which pinned the defect in
+#: place — this one points at zero from both sides.
+RUNNING_SEGMENT_BIAS_BOUND = 2.25
+RUNNING_SEGMENT_BIAS_MARGIN = 0.6
 
 #: Static sheet price, overall MAE: measured 2.2388 — the history fit's
 #: calibration claim.
@@ -510,12 +520,27 @@ Method, in five rules:
 """
 
 
+#: The room's initial discretionary money on this fixture: the twelve
+#: 2025 budgets minus the $1 every roster slot pins. A property of the
+#: replay fixture, not of the engine, so the narrative states it as the
+#: constant it is.
+_DISCRETIONARY_2025 = 1464
+
+#: The raw PRE-clamp ratio census on this fixture, recovered by
+#: re-driving the replay with both clamps opened. The ratio is computed
+#: from real budgets and real hammer prices, so it does not depend on
+#: the clamp; ``test_the_raw_pre_clamp_ratio_census`` pins these same
+#: values. Fixture properties like ``_DISCRETIONARY_2025``: re-measure
+#: them when the absorbable-pool change moves the denominator.
+_RAW_RATIO_MIN_2025 = -0.2100727356
+_NEGATIVE_NUMERATOR_LOTS_2025 = 36
+
+
 def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -> str:
     scored = scored_records(records)
     run = overall_stats(records, "running")
     static = overall_stats(records, "static")
     early, mid, late = segment_stats(records, "running")
-    opening = scored[0].inflation
     clamped = sum(1 for record in scored if record.inflation == INFLATION_MIN)
     sold = {record.player_id for record in records}
     unsold = sum(
@@ -523,47 +548,71 @@ def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow])
         for row in rows
         if row.player_id not in sold
     )
-    return f"""## Finding: the running estimate deflates the early board
+    return f"""## Finding: the floor holds every 2025 lot at par
 
 The calibration lives in the static sheet: MAE {static.mae:.2f}, bias
 {static.bias:+.2f} — this room's own 2023-2024 prices predict its 2025
 prices to within about two dollars a lot, with no meaningful drift
-(segment table above). The running estimate then multiplies that sheet
-by remaining-money-over-remaining-value per position, and that ratio
-opens at {opening:.3f} and, on RB and WR (the positions carrying
-the drift), only falls: the engine's denominator counts EVERY
-unsold sheet row as competing for the room's money, but an
-auction only absorbs 180 lots. The overhang never clears — when the
-last lot closes, ${unsold:.0f} of taper-weighted above-floor sheet
-value is still unsold against the $1464 of discretionary money the
-room started with (the twelve 2025 budgets minus the $1 every roster
-slot pins), so about 76% of a room's money worth of priced value never
-sells. RB and WR fall to {INFLATION_MIN:.2f} before the opening third
-is out and never leave it — and {INFLATION_MIN:.2f} is the engine's
-INFLATION_MIN clamp, not a market reading; the raw ratio would keep
-falling without it. {clamped} of the {run.n} scored lots price at
-exactly that clamp. The resulting drift: the early board runs
-{early.stats.bias:+.2f} per lot, and the bias then shrinks
-({mid.stats.bias:+.2f} mid, {late.stats.bias:+.2f} late) NOT because
-the ratio recovers — it never regains more than a few cents — but
-because mid and late lots carry too little taper-weighted above-floor
-worth for a wrong ratio to move. Overall the running estimate scores
-MAE {run.mae:.2f}, bias {run.bias:+.2f} — strictly worse than the
-static sheet it adjusts, on this fixture.
+(segment table above). The running estimate multiplies that sheet by
+remaining-money-over-remaining-value per position, and on this replay
+that ratio sits below par at every scored sale moment: all
+{clamped} of the {run.n} scored lots price at the
+{INFLATION_MIN:.2f} INFLATION_MIN clamp. The running column above is
+therefore the static column, lot for lot — MAE
+{run.mae:.2f}, bias {run.bias:+.2f}, segment bias
+{early.stats.bias:+.2f} / {mid.stats.bias:+.2f} / {late.stats.bias:+.2f}
+— equal to the static numbers to the last decimal. There is no
+early-board drift left because there is no position-level adjustment
+left to drift.
 
-The shape is not an artifact of the sheet's normalization basis:
-rescaling the sheet's above-floor prices so the engine's
-worth-normalization contract holds exactly, or cutting the pool to the
-top 180, reproduced the same early-deep, late-flat drift within a
-fraction of a dollar. (Development measurements against the same
-fixtures: neither variant is regenerated by this report or pinned by
-the suite.) Draft-night reading: trust the static column for any
-expensive lot after the opening stretch — the clean late-board numbers
-above reflect 2025's cheap tail, not a recovered ratio, and an
-expensive nominee arriving late would still be deflated — and on the
-opening stretch itself treat the running estimate as a floor, not a
-fair price, whenever the room's budgets sit far below the sheet's pool
-value.
+Why the raw ratio is below par everywhere: the denominator counts EVERY
+unsold sheet row as competing for the room's money, but an auction only
+absorbs 180 lots. The overhang never clears — when the last lot closes,
+${unsold:.0f} of taper-weighted above-floor sheet value is still
+unsold against the ${_DISCRETIONARY_2025} of discretionary money the
+room started with, so about
+{100 * unsold / _DISCRETIONARY_2025:.0f}% of a room's money worth of
+priced value never sells. That denominator alone accounts for below
+par: at the opening lot no money has been spent, so every position's
+ratio is exactly the room's money over the whole taper-weighted pool.
+
+Below par is not the floor of it, though, and a denominator re-size
+will not reach the rest. On {_NEGATIVE_NUMERATOR_LOTS_2025} of the
+{run.n} scored lots the per-position budget SPLIT has overspent that
+position's share, which drives the NUMERATOR negative — measured
+minimum {_RAW_RATIO_MIN_2025:.4f}, every one of those lots WR. Since
+the ratio is (budgeted - spent) / left, shrinking the denominator makes
+a negative numerator more negative, not less. The floor is a bound on
+both defects, not a repair of either: raising it was measured, and the
+absorbable-pool change is separate work that addresses the denominator.
+
+What the floor costs, stated plainly. The engine can no longer say
+"this position is getting cheaper, bid less" — the deflation half of
+the model is discarded, not damped, so a mild overpay and a
+catastrophic one now read identically. On this fixture the
+inflation-adjusted price is also board-INDEPENDENT: the running column
+carries nothing the sheet did not already have. Both costs are accepted
+deliberately, on the argument that a below-par reading on THIS sheet is
+its overhang and its budget split talking rather than the market
+(a production sheet is normalized to the room's money and does not
+open below par at all), and both are pinned by
+`tests/test_backtest_replay.py` so the absorbable-pool fix has to come
+back and re-measure this floor.
+
+For the record, the pre-change measurement that motivated the constant
+(engine at INFLATION_MIN 0.25, same fixtures, same sheet): the ratio
+opened at 0.599, RB and WR reached the 0.25 clamp before the opening
+third was out, 84 of the 159 scored lots priced at exactly that clamp,
+and the running estimate scored MAE 5.54 with a -11.81 early-board bias
+— an expensive mid-draft nominee displayed at roughly a quarter of his
+real price. That measurement is historical and is not regenerated here;
+what this report regenerates is the behaviour above.
+
+Draft-night reading: the running estimate can now only sit at or above
+the sheet price, so it is safe to read on an expensive nominee at any
+point in the draft. What it will not do this season is warn you that a
+position has gone cold. For that, read the tier and last-of-tier flags
+and the room's remaining money.
 """
 
 
@@ -584,6 +633,13 @@ def _report_gate(records: Sequence[BacktestRecord]) -> list[str]:
             f"{run_spread:.2f}",
             f"{RUNNING_DRIFT_SPREAD_BOUND:.2f}",
             f"{RUNNING_DRIFT_SPREAD_MARGIN:.2f}",
+        ),
+        (
+            # No pipes in a cell label: they would split the table column.
+            "running worst segment absolute bias",
+            f"{max(abs(s.stats.bias) for s in segment_stats(records, 'running')):.2f}",
+            f"{RUNNING_SEGMENT_BIAS_BOUND:.2f}",
+            f"{RUNNING_SEGMENT_BIAS_MARGIN:.2f}",
         ),
         (
             "static MAE",
@@ -611,10 +667,13 @@ def _report_gate(records: Sequence[BacktestRecord]) -> list[str]:
         "stated margins as regression headroom. The suite asserts each",
         "metric under its bound AND each bound within its margin of the",
         "measured value, so a loose stale bound fails the same as a",
-        "regression. The running bias spread bound is a REGRESSION PIN of",
-        "the measured deflation drift documented above — deliberately not",
-        "a no-systematic-drift certificate; that claim is asserted where",
-        "it is true, on the static sheet.",
+        "regression. The running drift bounds are no-systematic-drift",
+        "assertions now, not the regression pin of a known deflation",
+        "drift they used to be: they point at zero from both sides. They",
+        "coincide with the static bounds because the inflation floor",
+        "binds on every scored lot here, so the two estimates are the",
+        "same numbers — they are separate metrics, not aliases, and the",
+        "absorbable-pool change will separate them again.",
         "",
         *_table(("metric", "measured", "bound", "margin"), body),
     ]

@@ -113,7 +113,15 @@ def test_spend_down_forces_full_budget_use(config):
     meaningful cash — shallower schedules strand \\$10-16 of the \\$200
     here, and a value-capped bidder strands \\$40+. The bargain stance
     must also show: the engine wins none of the opening lots, where the
-    room still pays full value and no pace deficit exists."""
+    room still pays full value and no pace deficit exists.
+
+    The sim sheet is deliberately richer than the room (a ~\\$2400 curve
+    against \\$2220 of discretionary money), so its raw ratio sits just
+    below par and ``INFLATION_MIN = 1.0`` holds it AT par: the engine
+    bids a little more early than it did under the old 0.25 floor and
+    takes its first lot at 5 instead of 7, spending the budget out
+    exactly rather than stranding \\$3. The bargain stance still shows —
+    it wins nothing in the opening four lots."""
     board, my_lots = _run_simulated_draft(config)
 
     me = board.team(_MY_SLOT)
@@ -121,7 +129,7 @@ def test_spend_down_forces_full_budget_use(config):
     assert me.purchase_count == _SLOTS_PER_TEAM
     assert me.remaining <= 5, f"finished with ${me.remaining} unspent"
     assert me.spent >= _BUDGET - 5
-    assert all(lot_number > 5 for lot_number, _, _ in my_lots)
+    assert all(lot_number > 4 for lot_number, _, _ in my_lots)
     # The whole room stayed legal: nobody overspent or overfilled.
     for team in board.teams:
         assert team.remaining >= 0
