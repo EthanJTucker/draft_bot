@@ -206,8 +206,9 @@ warning. Below it: the sortable/filterable positional table of remaining
 players, every team's budget as remaining dollars (never spent) with open
 slots and max possible bid, and my roster and remaining budget pinned.
 Fail-closed rendering: an untrusted picks feed, a cache-served draft
-object, a paused draft, or a lot with no recorded high bid shows a banner
-or reason and suppresses the verdict; any poll failure (source outage or
+object, a paused draft, a lot with no recorded high bid, or a budget
+nobody entered for my slot shows a banner or reason and suppresses the
+verdict; any poll failure (source outage or
 processing error) keeps serving the last good state labeled as such; and
 a nomination pointer naming a just-sold player is priced against the
 pre-sale board and labeled final — or refuses with the reason when no
@@ -228,5 +229,21 @@ silently wrong) unless `--allow-no-keepers` says the league truly kept no
 one. Options: `--config`, `--cache-dir`, `--host`, `--port`,
 `--interval`, `--accelerate`, `--my-slot` (defaults to the config's
 roster id resolved against the draft; an out-of-range slot is rejected at
-startup), `--allow-no-keepers`. Exit codes: 0 served and shut down
-cleanly, 2 nothing ran.
+startup), `--allow-no-keepers`, `--budget`. Exit codes: 0 served and shut
+down cleanly, 2 nothing ran.
+
+Per-team budgets are the one number Sleeper may not give you. It carries
+them only as `draft.settings.budget_<slot>`, which exist only once the
+commissioner enters each team's post-keeper money; until then every team
+reads at the league-wide default, which on a keeper board overstates the
+whole room and never converges (remaining is budget minus spend, so a
+wrong budget stays wrong to the last lot). Any slot in that state is
+marked, and my own defaulted budget suppresses the verdict rather than
+advising off a number the tool made up. `--budget SLOT=AMOUNT` keys the
+real figures by hand from the league sheet, repeatably
+(`--budget 7=96 --budget 3=143`); a live Sleeper key always wins over a
+hand-keyed one. AMOUNT is a whole-draft budget, the same quantity
+`budget_<slot>` carries. The suppression is per-slot on purpose: keying
+my own slot restores my verdict even while the rest of the room is still
+uncovered, because a tool that blanks for all 180 lots would be worse
+than one that shows a labeled figure.
