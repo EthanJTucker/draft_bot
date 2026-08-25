@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>draftbot</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d212b; --line: #262b37;
+    --text: #e8eaf0; --dim: #8b93a7; --green: #3fd68f; --red: #ff5d6c;
+    --amber: #ffb454; --accent: #5aa9ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, "Segoe UI", Roboto, sans-serif;
+    padding: 10px 14px;
+  }
+  .num { font-variant-numeric: tabular-nums; }
+
+  #banners { display: flex; flex-wrap: wrap; gap: 8px; }
+  #banners:not(:empty) { margin-bottom: 10px; }
+  .banner {
+    padding: 7px 14px; border-radius: 6px; font-weight: 700;
+    letter-spacing: .03em; font-size: 15px;
+  }
+  .banner.red { background: #4a1420; color: var(--red); border: 1px solid var(--red); }
+  .banner.amber { background: #3d2c10; color: var(--amber); border: 1px solid var(--amber); }
+
+  /* ---- top bar ---- */
+  #topbar {
+    display: flex; align-items: stretch; gap: 12px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px; margin-bottom: 12px;
+  }
+  #nom-block { min-width: 240px; flex: 1 1 240px; }
+  #nominee { font-size: 30px; font-weight: 800; line-height: 1.1; }
+  #nom-sub { color: var(--dim); margin-top: 4px; font-size: 13px; }
+  .chip {
+    display: inline-block; padding: 2px 9px; border-radius: 99px;
+    font-size: 12px; font-weight: 700; letter-spacing: .05em; vertical-align: 3px;
+  }
+  .chip.live { background: #12351f; color: var(--green); border: 1px solid var(--green); }
+  .chip.sold { background: #2a2f3a; color: var(--dim); border: 1px solid var(--dim); }
+  .chip.bad { background: #4a1420; color: var(--red); border: 1px solid var(--red); }
+  .chip.warn { background: #3d2c10; color: var(--amber); border: 1px solid var(--amber); }
+
+  .stat { text-align: center; padding: 2px 14px; border-left: 1px solid var(--line); }
+  .stat .label { color: var(--dim); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+  .stat .value { font-size: 30px; font-weight: 800; margin-top: 2px; }
+  .stat .sub { color: var(--dim); font-size: 11px; margin-top: 1px; min-height: 14px; }
+  #max-bid { color: var(--accent); }
+  #verdict.bid { color: var(--green); }
+  #verdict.pass { color: var(--red); }
+  #verdict.off { color: var(--dim); font-size: 22px; }
+  #profit.under { color: var(--green); }
+  #profit.over { color: var(--red); }
+  #profit.even { color: var(--dim); }
+  #tier-warning { display: none; align-self: center; }
+  #tier-warning.on {
+    display: block; background: #3d2c10; border: 1px solid var(--amber);
+    color: var(--amber); font-weight: 800; padding: 8px 14px;
+    border-radius: 8px; font-size: 15px;
+  }
+
+  /* ---- main grid ---- */
+  #main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .panel h2 {
+    font-size: 12px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .1em; margin-bottom: 8px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 4px 8px; text-align: right; white-space: nowrap; }
+  th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3) { text-align: left; }
+  thead th {
+    color: var(--dim); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; cursor: pointer; user-select: none;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0;
+    background: var(--panel);
+  }
+  tbody tr:nth-child(even) { background: var(--panel2); }
+  #players-wrap { max-height: 74vh; overflow-y: auto; }
+  #filters { margin-bottom: 8px; display: flex; gap: 6px; }
+  #filters button {
+    background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 12px; cursor: pointer; font-weight: 700;
+  }
+  #filters button.on { color: var(--text); border-color: var(--accent); }
+
+  #my-team .money { font-size: 34px; font-weight: 800; color: var(--green); }
+  #my-team .caps { color: var(--dim); font-size: 13px; margin: 2px 0 8px; }
+  #my-roster li { list-style: none; padding: 2px 0; border-bottom: 1px solid var(--line); display: flex; }
+  #my-roster .pos { color: var(--dim); width: 38px; }
+  #my-roster .price { margin-left: auto; color: var(--dim); }
+  .me-row { outline: 2px solid var(--accent); }
+  .needs { color: var(--amber); font-size: 12px; }
+
+  #footer { color: var(--dim); font-size: 12px; margin-top: 10px; display: flex; gap: 18px; flex-wrap: wrap; }
+  #sales li { list-style: none; padding: 1px 0; color: var(--dim); }
+  #sales b { color: var(--text); font-weight: 600; }
+  .legend { color: var(--dim); font-size: 11px; margin-top: 6px; }
+  #foot-note { color: var(--amber); }
+</style>
+</head>
+<body>
+  <div id="banners"></div>
+
+  <div id="topbar">
+    <div id="nom-block">
+      <div id="nominee">&mdash;</div>
+      <div id="nom-sub"></div>
+    </div>
+    <div class="stat"><div class="label">High bid</div><div id="high-bid" class="value num">&mdash;</div><div id="high-bid-sub" class="sub"></div></div>
+    <div class="stat"><div class="label">Worth</div><div id="worth" class="value num">&mdash;</div><div class="sub"></div></div>
+    <div class="stat"><div class="label">Room price</div><div id="room-price" class="value num">&mdash;</div><div class="sub"></div></div>
+    <div class="stat"><div class="label">My max bid</div><div id="max-bid" class="value num">&mdash;</div><div id="max-bid-sub" class="sub"></div></div>
+    <div class="stat"><div class="label">Verdict</div><div id="verdict" class="value off">&mdash;</div><div id="verdict-sub" class="sub"></div></div>
+    <div class="stat"><div class="label">Profit (price&minus;value)</div><div id="profit" class="value num even">&mdash;</div><div class="sub">$0 = at value</div></div>
+    <div id="tier-warning">LAST OF TIER</div>
+  </div>
+
+  <div id="main">
+    <div class="panel">
+      <h2>Remaining players</h2>
+      <div id="filters"></div>
+      <div id="players-wrap"><table>
+        <thead id="players-head"></thead>
+        <tbody id="players"></tbody>
+      </table></div>
+    </div>
+    <div>
+      <div class="panel" id="my-team">
+        <h2>My team</h2>
+        <div class="money num" id="my-remaining">&mdash;</div>
+        <div class="caps" id="my-caps"></div>
+        <ul id="my-roster"></ul>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h2>Team budgets (remaining)</h2>
+        <table><thead><tr><th>Slot</th><th></th><th>Needs</th><th>$ left</th><th>Open</th><th>Max</th></tr></thead>
+        <tbody id="teams"></tbody></table>
+        <div class="legend">* budget not entered on Sleeper yet; shown at the league default</div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h2>Recent sales</h2>
+        <ul id="sales"></ul>
+      </div>
+    </div>
+  </div>
+
+  <div id="footer">
+    <span id="foot-status"></span>
+    <span id="foot-polls"></span>
+    <span id="foot-sales"></span>
+    <span id="foot-updated"></span>
+    <span id="foot-note"></span>
+  </div>
+
+<script>
+"use strict";
+/* One fetch of /state per second; every render reads only that JSON.
+   No frameworks, no external assets: this file is the whole frontend. */
+
+var POSITIONS = ["ALL", "QB", "RB", "WR", "TE", "K", "DEF"];
+var filterPos = "ALL";
+var sortKey = "rank";
+var sortAsc = true;
+var failures = 0;
+
+function esc(text) {
+  return String(text == null ? "" : text).replace(/[&<>"']/g, function (ch) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+  });
+}
+function dollars(value) {
+  if (value == null) return "—";
+  return "$" + Math.round(value);
+}
+function signedDollars(value) {
+  if (value == null) return "—";
+  var rounded = Math.round(value);
+  if (rounded > 0) return "+$" + rounded;
+  if (rounded < 0) return "−$" + Math.abs(rounded);
+  return "$0";
+}
+function put(id, text) { document.getElementById(id).textContent = text; }
+
+function renderBanners(s) {
+  var out = [];
+  if (failures > 1) out.push(['red', 'DASHBOARD DISCONNECTED — page cannot reach the local server']);
+  if (s.source_error) out.push(['red', 'FEED UNAVAILABLE — showing last good state (' + esc(s.source_error) + ')']);
+  if (s.paused) out.push(['amber', 'DRAFT PAUSED']);
+  if (s.nomination && s.nomination.status === 'untrusted')
+    out.push(['red', 'PICKS FEED UNTRUSTED — verdict withheld']);
+  if (s.stale_endpoints && s.stale_endpoints.length)
+    out.push(['amber', 'SERVED FROM CACHE, NOT LIVE: ' + esc(s.stale_endpoints.join(', '))]);
+  (s.settings_warnings || []).forEach(function (w) {
+    out.push(['amber', 'SETTINGS DIFFER — ' + esc(w.field) + ': expected ' + esc(w.expected) + ', live ' + esc(w.actual)]);
+  });
+  if (s.nomination && s.nomination.analysis_error)
+    out.push(['red', 'CANNOT PRICE THIS LOT — ' + esc(s.nomination.analysis_error)]);
+  document.getElementById('banners').innerHTML = out.map(function (b) {
+    return '<div class="banner ' + b[0] + '">' + b[1] + '</div>';
+  }).join('');
+}
+
+function statusChip(nom) {
+  if (nom.status === 'live') return '<span class="chip live">LIVE</span>';
+  if (nom.status === 'sold_between_lots') return '<span class="chip sold">SOLD' + (nom.pre_sale ? ' · priced pre-sale' : '') + '</span>';
+  if (nom.status === 'sold_stale') return '<span class="chip warn">SOLD · POINTER STALE</span>';
+  if (nom.status === 'untrusted') return '<span class="chip bad">UNTRUSTED</span>';
+  return '';
+}
+
+function renderNomination(s) {
+  var nom = s.nomination || {};
+  var el = document.getElementById('nominee');
+  if (!nom.player_id) {
+    el.textContent = 'No nomination data';
+    document.getElementById('nom-sub').innerHTML =
+      s.status === 'complete' ? 'draft complete' : 'values, budgets, and sales below stay live';
+  } else {
+    el.textContent = nom.name || nom.player_id;
+    var sub = (nom.position ? esc(nom.position) + ' · ' : '') + statusChip(nom);
+    if (nom.nominating_slot != null) sub += ' <span>nominated by slot ' + esc(nom.nominating_slot) + '</span>';
+    document.getElementById('nom-sub').innerHTML = sub;
+  }
+  var analysis = nom.analysis;
+  put('high-bid', nom.high_bid == null ? '—' : dollars(nom.high_bid));
+  put('high-bid-sub', nom.offering_slot != null ? 'slot ' + nom.offering_slot : '');
+  put('worth', analysis ? dollars(analysis.worth) : '—');
+  put('room-price', analysis && analysis.room_price != null ? dollars(analysis.room_price) : '—');
+  put('max-bid', analysis ? dollars(analysis.max_bid) : '—');
+  put('max-bid-sub', analysis ? 'cap ' + dollars(analysis.my_cap) + ' · infl ×' + analysis.inflation.toFixed(2) : '');
+
+  var verdictEl = document.getElementById('verdict');
+  if (nom.verdict) {
+    verdictEl.className = 'value ' + (nom.verdict.action === 'BID' ? 'bid' : 'pass');
+    verdictEl.textContent = nom.verdict.action;
+    put('verdict-sub', (nom.verdict.basis === 'final' ? 'final · ' : '') + 'margin ' + signedDollars(nom.verdict.margin));
+  } else {
+    verdictEl.className = 'value off';
+    verdictEl.textContent = '—';
+    put('verdict-sub', nom.verdict_reason || '');
+  }
+
+  var profitEl = document.getElementById('profit');
+  profitEl.textContent = signedDollars(nom.profit);
+  profitEl.className = 'value num ' + (nom.profit == null || Math.round(nom.profit) === 0 ? 'even' : (nom.profit > 0 ? 'over' : 'under'));
+
+  var tier = analysis && analysis.tier;
+  var warningEl = document.getElementById('tier-warning');
+  if (nom.last_of_tier && tier) {
+    warningEl.className = 'on';
+    warningEl.textContent = 'LAST OF TIER — ' + (nom.position || '') + ' tier ' + tier.tier;
+  } else {
+    warningEl.className = '';
+  }
+}
+
+function renderFilters() {
+  document.getElementById('filters').innerHTML = POSITIONS.map(function (pos) {
+    return '<button class="' + (pos === filterPos ? 'on' : '') + '" onclick="setFilter(\'' + pos + '\')">' + pos + '</button>';
+  }).join('');
+}
+function setFilter(pos) { filterPos = pos; render(lastState); }
+function setSort(key) {
+  if (sortKey === key) { sortAsc = !sortAsc; } else { sortKey = key; sortAsc = key === 'rank' || key === 'name' || key === 'position'; }
+  render(lastState);
+}
+
+var COLUMNS = [
+  ['rank', '#'], ['name', 'Player'], ['position', 'Pos'],
+  ['worth', 'Worth'], ['room_price', 'Room'], ['value', 'Value']
+];
+function renderPlayers(s) {
+  document.getElementById('players-head').innerHTML = '<tr>' + COLUMNS.map(function (col) {
+    var mark = sortKey === col[0] ? (sortAsc ? ' ▴' : ' ▾') : '';
+    return '<th onclick="setSort(\'' + col[0] + '\')">' + col[1] + mark + '</th>';
+  }).join('') + '</tr>';
+  var rows = (s.players || []).filter(function (p) { return filterPos === 'ALL' || p.position === filterPos; });
+  rows.sort(function (a, b) {
+    var va = a[sortKey], vb = b[sortKey];
+    var cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+    if (cmp === 0) cmp = a.rank - b.rank;
+    return sortAsc ? cmp : -cmp;
+  });
+  document.getElementById('players').innerHTML = rows.map(function (p) {
+    return '<tr><td class="num">' + p.rank + '</td><td>' + esc(p.name) + '</td><td>' + esc(p.position) +
+      '</td><td class="num">' + dollars(p.worth) + '</td><td class="num">' + dollars(p.room_price) +
+      '</td><td class="num">' + dollars(p.value) + '</td></tr>';
+  }).join('');
+}
+
+function needsText(needs) {
+  var keys = Object.keys(needs || {});
+  return keys.map(function (k) { return k + ':' + needs[k]; }).join(' ');
+}
+function renderTeams(s) {
+  document.getElementById('teams').innerHTML = (s.teams || []).map(function (t) {
+    return '<tr class="' + (t.is_me ? 'me-row' : '') + '"><td class="num">' + t.slot +
+      '</td><td>' + (t.is_me ? 'ME' : '') + (t.budget_is_default ? ' *' : '') + '</td>' +
+      '<td class="needs">' + esc(needsText(t.needs)) + '</td>' +
+      '<td class="num">' + dollars(t.remaining) + '</td><td class="num">' + t.open_slots +
+      '</td><td class="num">' + dollars(t.max_bid) + '</td></tr>';
+  }).join('');
+}
+function renderMe(s) {
+  var me = s.me;
+  if (!me) { put('my-remaining', '—'); put('my-caps', 'my slot unknown'); return; }
+  put('my-remaining', dollars(me.remaining));
+  put('my-caps', 'max bid ' + dollars(me.max_bid) + ' · ' + me.open_slots + ' open · needs ' + (needsText(me.needs) || '—'));
+  document.getElementById('my-roster').innerHTML = (me.roster || []).map(function (p) {
+    return '<li><span class="pos">' + esc(p.position || '?') + '</span><span>' + esc(p.name) +
+      (p.keeper ? ' (K)' : '') + '</span><span class="price num">' + (p.price == null ? '' : dollars(p.price)) + '</span></li>';
+  }).join('');
+}
+function renderSales(s) {
+  var sales = (s.sales || []).slice(-8).reverse();
+  document.getElementById('sales').innerHTML = sales.map(function (sale) {
+    return '<li><b>' + esc(sale.name) + '</b> ' + esc(sale.position || '') + ' — ' +
+      dollars(sale.amount) + ' to slot ' + sale.slot + '</li>';
+  }).join('');
+}
+
+var lastState = null;
+function render(s) {
+  if (!s) return;
+  lastState = s;
+  renderBanners(s);
+  if (!s.ok) { put('foot-status', 'waiting for first poll…'); return; }
+  renderNomination(s);
+  renderFilters();
+  renderPlayers(s);
+  renderTeams(s);
+  renderMe(s);
+  renderSales(s);
+  put('foot-status', 'draft: ' + s.status + (s.paused ? ' (PAUSED)' : ''));
+  put('foot-polls', 'polls: ' + s.poll_count);
+  put('foot-sales', 'sales: ' + (s.sales || []).length +
+    (s.off_model_player_ids && s.off_model_player_ids.length ? ' (' + s.off_model_player_ids.length + ' off-model)' : ''));
+  put('foot-updated', s.updated_at
+    ? 'updated ' + new Date(s.updated_at * 1000).toLocaleTimeString() + ' (poll #' + s.poll_count + ')'
+    : 'updated poll #' + s.poll_count);
+  put('foot-note', s.note || '');
+}
+
+function paintRenderFailure(s, message) {
+  /* The render itself crashed part-way: everything painted after the
+     throw point is the PREVIOUS lot's data next to this lot's name.
+     Say so in red rather than silently mixing two lots. */
+  var el = document.getElementById('banners');
+  try { renderBanners(s); } catch (ignored) { el.innerHTML = ''; }
+  el.innerHTML += '<div class="banner red">PAGE RENDER FAILED — values on screen may be stale (' +
+    esc(message) + ')</div>';
+}
+
+function tick() {
+  fetch('/state', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (s) {
+      try {
+        render(s);
+        failures = 0; /* only a fully successful render counts as healthy */
+      } catch (err) {
+        paintRenderFailure(s, String(err));
+      }
+    })
+    .catch(function () {
+      failures += 1;
+      /* No lastState yet (server down at page load) still deserves the
+         DISCONNECTED banner: renderBanners tolerates an empty state. */
+      renderBanners(lastState || {});
+    });
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

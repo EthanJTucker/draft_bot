@@ -4,8 +4,10 @@ Live auction assistant for a 12-team Sleeper keeper league. Built so far: a
 read-only Sleeper API client with an on-disk cache, clean parsed types for
 picks and draft state, a snapshot CLI, the static value sheet (room prices,
 projection worth, keeper NPV), and live draft tracking with a replay demo.
-The backtest report and the dashboard are the later slices. The decision
-record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
+The backtest report and the dashboard are built too, and the override
+file, the allocation plan, nomination suggestions, and the dry run are
+the later slices. The
+decision record lives in GAMEPLAN.md, PRD.md, and RESEARCH.md.
 
 ## Setup
 
@@ -74,8 +76,8 @@ nor cache).
 `draftbot/sources.py` and `draftbot/tracker.py` are the live draft-state
 slice. A live poll source and a historical replay source present the same
 one-method interface (`poll() -> SourceTick`), so the tracker cannot tell
-which one feeds it; later slices drive the backtest and the dashboard
-through the same seam. The tracker folds ticks into a board of per-team
+which one feeds it; the backtest and the dashboard drive it through the
+same seam. The tracker folds ticks into a board of per-team
 budgets (seeded from `budget_<slot>` once the commissioner enters keepers,
 the config default until then, labeled as defaulted), spend, open slots,
 positional needs, and max possible bid (remaining budget minus $1 for
@@ -178,10 +180,53 @@ price, an early/mid/late drift comparison, the off-model (K/DEF)
 exclusions, and the measured-first bounds the pytest gate asserts. The
 sheet is honest - room prices fit on the 2023-2024 bids only, applied to
 2025 preseason ADP - and the suite regenerates the report byte-for-byte,
-so the committed copy can never drift from the code. The replay is also
-the dashboard's offline data source: build the sheet with
-`draftbot.backtest.build_history_price_sheet`, then drive `ReplaySource`
-through `DraftTracker` and price each nominee with `analyze_player` on
-the pre-sale board, exactly as `draftbot.backtest.replay_records` does
-(its docstring is the reference). Options: `--config`, `--history`,
+so the committed copy can never drift from the code. The backtest and
+the dashboard's `--replay` mode drive the same chain - `ReplaySource`
+through `DraftTracker`, each nominee priced with `analyze_player` on the
+pre-sale board (`draftbot.backtest.replay_records` is the reference) -
+but each builds its own sheet: the backtest fits the honest history
+sheet with `draftbot.backtest.build_history_price_sheet`, while the
+dashboard derives its demo sheet from the replay's own hammer prices
+unless `--sheet` supplies a real one. Options: `--config`, `--history`,
 `--draft`, `--season`, `--out`.
+
+## Dashboard
+
+```
+python -m draftbot.dashboard --replay tests/fixtures/draft_2025.json --accelerate 4
+```
+
+Serves one auto-refreshing page at `http://127.0.0.1:8724` from a `/state`
+JSON endpoint, polled once per cycle (~1s live; `--accelerate` divides the
+interval in replay). The top bar shows the nominated player, current high
+bid, worth, room price, my max bid, a plain BID/PASS verdict (BID exactly
+when the high bid is below my max; equality can only match, so it is
+PASS), profit as price-minus-value centered at $0, and the last-of-tier
+warning. Below it: the sortable/filterable positional table of remaining
+players, every team's budget as remaining dollars (never spent) with open
+slots and max possible bid, and my roster and remaining budget pinned.
+Fail-closed rendering: an untrusted picks feed, a cache-served draft
+object, a paused draft, or a lot with no recorded high bid shows a banner
+or reason and suppresses the verdict; any poll failure (source outage or
+processing error) keeps serving the last good state labeled as such; and
+a nomination pointer naming a just-sold player is priced against the
+pre-sale board and labeled final — or refuses with the reason when no
+board from just before that sale was observed. If nomination metadata is
+missing entirely, values, budgets, and sold players still render from
+picks polling.
+
+The replay command above needs nothing but the checked-in fixture: it
+derives a demo sheet from the replay's own hammer prices (so profit reads
+$0 and the bargain-margin bot rationally PASSes every lot; the layout is
+the point — and the page footer says so). Pass `--sheet
+data/value_sheet_2026.csv` to price the replay against a real value sheet
+instead, with varying profits and verdicts. Live mode (no `--replay`)
+requires `--sheet` and pulls keeper lists from the league's rosters at
+startup; if this keeper league's rosters come back with zero keepers the
+dashboard refuses to start (pricing a keeper board keeper-free would be
+silently wrong) unless `--allow-no-keepers` says the league truly kept no
+one. Options: `--config`, `--cache-dir`, `--host`, `--port`,
+`--interval`, `--accelerate`, `--my-slot` (defaults to the config's
+roster id resolved against the draft; an out-of-range slot is rejected at
+startup), `--allow-no-keepers`. Exit codes: 0 served and shut down
+cleanly, 2 nothing ran.

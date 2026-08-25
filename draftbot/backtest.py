@@ -26,15 +26,20 @@ absolute error. Sales the sheet does not price (all K/DEF in 2025 — the
 fixture's history carries no K/DEF market) are off-model: the engine flags
 them, the statistics exclude them, and the report counts and lists them.
 
-Offline data source for the dashboard (issue #7): the dashboard drives the
-SAME replay through the existing public seams — build the sheet with
-:func:`build_history_price_sheet`, feed ``ReplaySource(data["draft"],
-data["picks"])`` into a ``DraftTracker(config,
+Offline data source for the dashboard (issue #7): the dashboard's
+``--replay`` mode drives the SAME chain through the existing public
+seams — feed ``ReplaySource(data["draft"], data["picks"])`` into a
+``DraftTracker(config,
 expected_settings=default_expected_settings(config),
 value_sheet=value_map(rows))``, hold each board before polling the next
-tick, and price nominees with ``analyze_player`` on that PRE-sale board —
-exactly what :func:`replay_records` does in one call. Everything is
-offline and deterministic: two runs emit byte-identical reports.
+tick, and price nominees with ``analyze_player`` on that PRE-sale board
+(:func:`replay_records` is the reference) — but each builds its own
+sheet: this backtest fits the honest history sheet with
+:func:`build_history_price_sheet`, while the dashboard derives its demo
+sheet from the replay's own hammer prices
+(``draftbot.dashboard.sheets.replay_sheet``) unless ``--sheet``
+supplies a real one. Everything is offline and deterministic: two runs
+emit byte-identical reports.
 
 Run as ``python -m draftbot.backtest`` to (re)generate the committed
 report at ``reports/backtest_2025.md``.
