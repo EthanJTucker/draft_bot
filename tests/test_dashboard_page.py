@@ -21,15 +21,18 @@ else about the page. Specifically invisible to it:
   anywhere all leave every asserted declaration byte-identical and
   repaint the page.
 
-  Counting is what closes any of these, and it closes exactly one
-  shape: a SECOND rule spelled with a selector that is counted. The
-  asserts below hold ``--amber``, ``#banners {``, ``.banner {``,
-  ``.banner.amber`` and the three ``.guessed`` mark rules at one
-  occurrence each. Appending duplicates of those three ``.guessed``
-  selectors in ``var(--accent)`` repainted every amber mark on the page
-  in confident blue at exit 0 — same selectors, no ``!important``, no
-  added specificity, one cascade level below the token — and that is
-  what the three ``.guessed`` counts now stop.
+  Counting is what closes any of these. The asserts below hold
+  ``--amber``, ``#banners {``, ``.banner {``, ``.banner.amber`` and the
+  four ``.guessed`` mark SELECTORS at one occurrence each. Four
+  selectors in three rules: ``#my-team .money.guessed, #my-team
+  .caps.guessed`` is a single rule carrying two of them, and counting
+  the rule count instead left ``.caps.guessed`` free — appending it in
+  ``var(--accent)`` repainted the my-team caps line blue at exit 0 with
+  every other count still at 1. Appending duplicates of these selectors
+  in ``var(--accent)`` repaints every amber mark on the page in
+  confident blue — same selectors, no ``!important``, no added
+  specificity, one cascade level below the token — and that is what the
+  four ``.guessed`` counts now stop.
 
   WHAT COUNTING CANNOT REACH, all of it measured green today: a rule
   whose selector is not one of the counted ones. ``#topbar #max-bid
@@ -311,16 +314,27 @@ def test_index_page_delivers_the_marks_and_banners_it_spells(config):
     assert "var capEl = document.getElementById('max-bid-sub');" in page
     assert "put('verdict-sub', nom.verdict_reason || '')" in page
     assert page.count(".banner {") == 1
-    # 9. The three amber MARK rules, counted. The `--amber:` count above
+    # 9. The amber MARK selectors, counted. The `--amber:` count above
     #    closes the token; this closes the same attack one cascade level
     #    lower, where it does not need the token at all. Appending
-    #    equal-specificity duplicates of these three selectors in
+    #    equal-specificity duplicates of these selectors in
     #    `var(--accent)` — same selectors, later in the file, no
     #    `!important` and no added specificity — repainted every amber
     #    mark on the page, including all four this branch added, in
     #    confident blue, at exit 0 with the declarations next door still
     #    byte-identical. These are the marks that say a 30px figure is a
     #    guess, so blue is the one colour they must never be.
+    #    FOUR selectors, not three rules: `#my-team .money.guessed,
+    #    #my-team .caps.guessed` is one rule carrying two of them, and
+    #    while only `.money.guessed` was counted, appending
+    #    `#my-team .caps.guessed { color: var(--accent); }` repainted the
+    #    my-team caps line blue at exit 0 with every other count at 1.
+    #    A count of exactly 1 also forbids a LEGITIMATE second spelling —
+    #    an `@media print` or forced-colours block repeating any of these
+    #    selectors trips it. That is the price of the check on a page
+    #    with one style block; whoever adds the second block must move
+    #    this to a scoped count rather than delete it.
     assert page.count("#max-bid.guessed") == 1
     assert page.count(".money.guessed") == 1
+    assert page.count(".caps.guessed") == 1
     assert page.count(".sub.guessed") == 1
