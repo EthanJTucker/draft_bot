@@ -600,6 +600,16 @@ def test_a_mis_keyed_override_is_named_in_a_banner_once_sleeper_carries_keys(tmp
     state = server.poller.step()
     assert state["me"]["remaining"] == 150  # my real key, untouched
     assert state["me"]["budget_is_default"] is False
+    # SOURCE PIN for the board-wide staleness flag, and the only place a
+    # realistic board holds it to False. This board is sound (the bridge
+    # matches the seating) but noisy: it carries budget and keeper_budgets
+    # warnings, so `bool(board.settings_warnings)` correlates with the
+    # flag on the two boards that guard it elsewhere — none at all, and
+    # only the stale one — and reads True here. That mis-source is one
+    # dropped field filter away, because the stale fact is DELIVERED as a
+    # settings warning, and it paints the 30px max bid, my money and my
+    # caps amber and prints OLD DRAFT ORDER — RESTART on a healthy board.
+    assert state["keeper_map_stale"] is False
     (banner,) = [
         warning
         for warning in state["settings_warnings"]
