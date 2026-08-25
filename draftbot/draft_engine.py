@@ -51,16 +51,17 @@ TAPER_ZERO_RANK = 150
 
 #: Clamp on the per-position ratio. The ceiling is the original sanity
 #: bound: a depleted denominator late in the draft must not emit an
-#: absurd multiplier.
+#: absurd multiplier. It is reachable and pinned by
+#: ``test_a_depleted_pool_is_held_at_the_ceiling`` (raw ratio 4.47),
+#: though the 2025 replay never comes near it.
 #:
 #: The FLOOR is a measured value, and it is doing more than sanity work.
 #: It was 0.25, and on the 2025 replay 84 of the 159 scored lots priced
 #: at exactly that clamp — an expensive mid-draft nominee displaying at
 #: roughly a quarter of his real price. Sweeping the replay across
-#: candidate floors (reports/backtest_2025.md carries the resulting
-#: numbers) showed running MAE, absolute running bias and the
-#: early/mid/late bias spread all falling monotonically as the floor
-#: rose, and all three reaching their minimum at exactly 1.0:
+#: candidate floors (re-run ``python -m draftbot.backtest`` with this
+#: constant overridden to reproduce any row; the committed report is a
+#: single-floor render and does not carry the sweep):
 #:
 #:     floor   running MAE   running bias   segment bias spread
 #:     0.25         5.5376        -5.3095               11.7962
@@ -69,18 +70,48 @@ TAPER_ZERO_RANK = 150
 #:     0.95         2.3370        -0.9706                2.6970
 #:     1.00         2.2388        -0.5522                1.9351
 #:
-#: 1.00 is also the only candidate under which the monotone early-to-late
-#: bias trend stops existing rather than merely shrinking.
+#: All three fall monotonically across that grid, so 1.00 scoring best
+#: within it is true by construction and is not itself the reason for
+#: the choice. The grid stops at par because par is the semantic
+#: boundary: above 1.0 the layer can only ever inflate, which is a flat
+#: markup rather than a model of an auction. The metrics do keep
+#: improving past par on this fixture, each bottoming out at a DIFFERENT
+#: floor — running MAE near 1.03 (2.2233), absolute bias near 1.066
+#: (0.0000), segment spread near 1.10 (0.5596) — because a constant
+#: markup absorbs the sheet's own -0.55 static bias. That is the sheet's
+#: calibration showing through, not a better floor, and the post-#17
+#: re-measurement should not chase it.
+#:
+#: Within the swept grid 1.00 is also where the monotone early-to-late
+#: bias trend stops existing rather than merely shrinking (1.00: -1.71 /
+#: +0.23 / +0.06, mid above late; 0.95: -2.64 / +0.03 / +0.06, still
+#: monotone). On a denser grid the crossing sits near 0.96, so that
+#: separates 1.00 from the rows above, not from every sub-par floor.
 #:
 #: The cost is real and deliberate: at 1.0 the engine can no longer say
 #: "this position is getting cheaper, bid less" — the deflation half of
-#: the model is discarded, not damped. The argument for paying it is that
-#: sub-1.0 is currently only reachable through the remaining-pool
-#: denominator counting sheet value the room never absorbs, and through
-#: the per-position budget split, so a below-par reading is not a market
-#: signal today. When the absorbable-pool fix lands, this floor is the
-#: first thing to re-measure: it is a bound on a known defect, not a
-#: statement about auctions.
+#: the model is discarded, not damped. The argument for paying it is
+#: scoped to the sheet the measurement came from.
+#: ``build_history_price_sheet`` sets worth = fitted room price with no
+#: normalization, so the backtest sheet's above-floor total (about
+#: $2445 taper-weighted) overhangs the room's $1464 of discretionary
+#: money and every position opens at 0.599. Sub-1.0 there is the
+#: remaining-pool denominator counting value the room never absorbs, and
+#: the per-position budget split, talking — not the market.
+#:
+#: The PRODUCTION sheet has no such overhang. ``compute_worths`` spreads
+#: exactly ``teams * (budget - drafted_slots)`` over VORP, so its
+#: above-floor total equals the room's discretionary money BY
+#: CONSTRUCTION; while the above-floor tail stays inside
+#: ``TAPER_FULL_RANK`` the taper shaves nothing off it and the ratio
+#: opens at 1.0 with no keepers and above 1.0 with them. On draft night
+#: this layer is therefore actively inflating, not inert, and a
+#: genuinely below-par reading there WOULD be a market signal — one this
+#: floor discards. Raising the floor did not create that cost (at or
+#: above par the raise is a no-op) and does not fix it. When the
+#: absorbable-pool fix lands, this floor is the first thing to
+#: re-measure: it is a bound on a known defect, not a statement about
+#: auctions.
 INFLATION_MIN = 1.0
 INFLATION_MAX = 3.0
 
