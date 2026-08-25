@@ -277,11 +277,17 @@ at startup, through whatever map the draft carried then; nothing
 re-fetches the rosters afterwards. So a dashboard launched before the
 order is dealt is bridged against the placeholder, and when the real
 order lands that bridge still describes the old seating while my own slot
-re-resolves correctly from the live board. Rather than show one team's
-keepers, needs, and open slots under another team's heading, the page
-raises a banner naming the slots that moved and stops advising. **The
-remedy is a restart**, which rebuilds the bridge against the order now in
-force. Launching after the order is dealt never reaches this.
+re-resolves correctly from the live board. The keeper counts stay on the
+seats the old order gave them, so the page raises a banner naming the
+slots that moved and stops advising. It also marks the figures built on
+that seating rather than leaving them to read as facts: my max bid, my
+remaining money, my caps line and my roster list all go amber and carry
+`OLD DRAFT ORDER — RESTART`. The money in them is real, so this is not
+the budget wording; what moved is the seating behind it. **The remedy is
+a restart**, which rebuilds the bridge against the order now in force.
+Launching after the order is dealt never reaches this, and neither does
+a board carrying no keepers at all: an empty bridge has nothing to fall
+behind, and every figure on such a board is slot-keyed anyway.
 
 Leave `--my-slot` alone unless the map cannot answer for itself. It is a
 replay and debugging convenience, not a way to get ahead of the draft
