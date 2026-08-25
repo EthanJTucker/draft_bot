@@ -49,11 +49,14 @@ else about the page. Specifically invisible to it:
 * CALL SITES, and separately the DOM SINKS they write into. Most render
   pins assert a loop BODY, which survives both deleting the call and
   retargeting the ``innerHTML`` or ``put`` it feeds. Two call sites and
-  four sinks are pinned below; every other sink is not.
+  five sinks are pinned below; every other sink is not.
 * ELEMENT COVERAGE. The script queries 26 ids; the id list below names
   12. ``my-remaining``, ``my-caps``, ``my-roster``, ``max-bid-sub`` and
-  ``verdict-sub`` are among the fourteen it omits, though the writes into
-  the last two are pinned as sinks.
+  ``verdict-sub`` are among the fourteen it omits. The writes into
+  ``my-roster``, ``max-bid-sub`` and ``verdict-sub`` are pinned as sinks
+  below — named, not counted from either end of that list, so moving a
+  name cannot quietly make this sentence false. ``my-remaining`` and
+  ``my-caps`` are not pinned at all.
 
 The disposition is deliberate: write the limit down rather than keep
 adding pins that cannot reach it, and do not stand up a JavaScript test
@@ -293,14 +296,19 @@ def test_index_page_delivers_the_marks_and_banners_it_spells(config):
     #    container, and none of that sees the assignment retargeted at a
     #    detached node, or an appended `.banner { display: none; }` that
     #    hides red and amber alike while `.banner.amber` and `#banners {`
-    #    each still count 1. Four one-line edits took the banners, every
+    #    each still count 1. Five one-line edits took the banners, every
     #    team row with its * and ! marks, my whole roster with the RESTART
-    #    note above it, and the withheld verdict's reason off the page at
-    #    exit 0, spelled above exactly as pinned. The roster sink is here
-    #    because it now carries a mark of its own, not only the list.
+    #    note above it, the entire max-bid sub-line — cap figure, BUDGET
+    #    NOT ENTERED, OLD DRAFT ORDER — RESTART and both room qualifiers —
+    #    and the withheld verdict's reason off the page at exit 0, spelled
+    #    above exactly as pinned. The roster and cap-sub sinks are here
+    #    because they now carry marks of their own, not only their text.
+    #    Each of these is a PRESENCE pin, and presence is all it proves:
+    #    an appended line overwriting the same element still passes.
     assert "document.getElementById('banners').innerHTML = out.map(" in page
     assert "document.getElementById('teams').innerHTML = (s.teams || []).map(" in page
     assert "document.getElementById('my-roster').innerHTML =" in page
+    assert "var capEl = document.getElementById('max-bid-sub');" in page
     assert "put('verdict-sub', nom.verdict_reason || '')" in page
     assert page.count(".banner {") == 1
     # 9. The three amber MARK rules, counted. The `--amber:` count above
