@@ -19,7 +19,10 @@ import json
 
 import pytest
 
-from draftbot.backtest import (
+from draftbot import draft_engine
+from draftbot.backtest import (  # the two census figures the report prints
+    _NEGATIVE_NUMERATOR_LOTS_2025,
+    _RAW_RATIO_MIN_2025,
     RUNNING_DRIFT_SPREAD_BOUND,
     RUNNING_DRIFT_SPREAD_MARGIN,
     RUNNING_MAE_BOUND,
@@ -218,6 +221,55 @@ class TestGateBounds:
         assert overall_stats(replay["records"], "running") == overall_stats(
             replay["records"], "static"
         )
+
+    def test_the_raw_pre_clamp_ratio_census(self, replay, monkeypatch):
+        """What the clamp is hiding, measured with the clamps opened.
+
+        The raw ratio is ``(budgeted - spent) / left`` over the room's
+        real budgets and real hammer prices, so it does not depend on
+        the clamp at all; re-driving the replay with both bounds opened
+        recovers it exactly. Three claims the report and the docstring
+        make rest on this census and nothing else pinned it:
+
+        - **max 0.5987 < 1.0** — no lot's raw ratio ever reaches par, so
+          "zero of the 159 lots at ``INFLATION_MIN``" is unsatisfiable
+          at any floor above the observed maximum, whatever the floor is
+          set to. This is the whole argument for the raised floor.
+        - **min -0.2101, on 36 of 159 lots, all WR** — below par is not
+          the worst of it. On those lots the per-position budget SPLIT
+          has overspent its share, so the numerator goes negative; a
+          denominator re-size cannot repair a negative numerator, which
+          is why the report says so and why #17 cannot simply assume it
+          will.
+        - **no lot sits at exactly 0.0** — the earlier census that
+          reported a 0.0000 minimum was swept with the floor set to 0.0
+          rather than opened, which flattened those 36 lots onto zero.
+
+        Re-measure and re-state the report when #17 changes the
+        denominator; do not just re-pin the literals.
+        """
+        monkeypatch.setattr(draft_engine, "INFLATION_MIN", -1e9)
+        monkeypatch.setattr(draft_engine, "INFLATION_MAX", 1e9)
+        records = replay_records(
+            replay["data"]["draft"],
+            replay["data"]["picks"],
+            replay["rows"],
+            replay["config"],
+        )
+        scored = scored_records(records)
+        assert len(scored) == 159
+        raw = [record.inflation for record in scored]
+        assert repr(max(raw)) == "0.59867897"
+        assert max(raw) < INFLATION_MIN
+        assert repr(min(raw)) == "-0.2100727356"
+        negative = [record for record in scored if record.inflation < 0]
+        assert len(negative) == 36
+        assert {record.position for record in negative} == {"WR"}
+        assert sum(1 for value in raw if value == 0.0) == 0
+        # The two figures the report prints come from this measurement,
+        # so a re-measure that skips the report fails here.
+        assert min(raw) == _RAW_RATIO_MIN_2025
+        assert len(negative) == _NEGATIVE_NUMERATOR_LOTS_2025
 
     def test_static_statistics_are_bit_identical_to_the_pre_floor_fit(self, replay):
         """Tripwire for the whole change: the static column is a property

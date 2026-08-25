@@ -526,6 +526,15 @@ Method, in five rules:
 #: constant it is.
 _DISCRETIONARY_2025 = 1464
 
+#: The raw PRE-clamp ratio census on this fixture, recovered by
+#: re-driving the replay with both clamps opened. The ratio is computed
+#: from real budgets and real hammer prices, so it does not depend on
+#: the clamp; ``test_the_raw_pre_clamp_ratio_census`` pins these same
+#: values. Fixture properties like ``_DISCRETIONARY_2025``: re-measure
+#: them when the absorbable-pool change moves the denominator.
+_RAW_RATIO_MIN_2025 = -0.2100727356
+_NEGATIVE_NUMERATOR_LOTS_2025 = 36
+
 
 def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow]) -> str:
     scored = scored_records(records)
@@ -563,9 +572,19 @@ ${unsold:.0f} of taper-weighted above-floor sheet value is still
 unsold against the ${_DISCRETIONARY_2025} of discretionary money the
 room started with, so about
 {100 * unsold / _DISCRETIONARY_2025:.0f}% of a room's money worth of
-priced value never sells. The floor is a bound on that leak, not a
-repair of it: raising it was measured, and the absorbable-pool change
-that removes the leak is separate work.
+priced value never sells. That denominator alone accounts for below
+par: at the opening lot no money has been spent, so every position's
+ratio is exactly the room's money over the whole taper-weighted pool.
+
+Below par is not the floor of it, though, and a denominator re-size
+will not reach the rest. On {_NEGATIVE_NUMERATOR_LOTS_2025} of the
+{run.n} scored lots the per-position budget SPLIT has overspent that
+position's share, which drives the NUMERATOR negative — measured
+minimum {_RAW_RATIO_MIN_2025:.4f}, every one of those lots WR. Since
+the ratio is (budgeted - spent) / left, shrinking the denominator makes
+a negative numerator more negative, not less. The floor is a bound on
+both defects, not a repair of either: raising it was measured, and the
+absorbable-pool change is separate work that addresses the denominator.
 
 What the floor costs, stated plainly. The engine can no longer say
 "this position is getting cheaper, bid less" — the deflation half of
@@ -573,8 +592,10 @@ the model is discarded, not damped, so a mild overpay and a
 catastrophic one now read identically. On this fixture the
 inflation-adjusted price is also board-INDEPENDENT: the running column
 carries nothing the sheet did not already have. Both costs are accepted
-deliberately, on the argument that a below-par reading today is the
-denominator leak talking rather than the market, and both are pinned by
+deliberately, on the argument that a below-par reading on THIS sheet is
+its overhang and its budget split talking rather than the market
+(a production sheet is normalized to the room's money and does not
+open below par at all), and both are pinned by
 `tests/test_backtest_replay.py` so the absorbable-pool fix has to come
 back and re-measure this floor.
 
