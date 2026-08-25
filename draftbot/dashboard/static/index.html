@@ -97,6 +97,10 @@
      the specificity of the rule it must beat. */
   #my-team .money.guessed, #my-team .caps.guessed { color: var(--amber); }
   .stat .sub.guessed { color: var(--amber); }
+  /* The id is load-bearing: `#max-bid` above is 1-0-0 and a bare
+     `.value.guessed` (0-2-0) loses to it, leaving the 30px figure in
+     confident accent blue with no mark at all. */
+  #max-bid.guessed { color: var(--amber); }
   #my-roster li { list-style: none; padding: 2px 0; border-bottom: 1px solid var(--line); display: flex; }
   #my-roster .pos { color: var(--dim); width: 38px; }
   #my-roster .price { margin-left: auto; color: var(--dim); }
@@ -147,7 +151,7 @@
         <h2>Team budgets (remaining)</h2>
         <table><thead><tr><th>Slot</th><th></th><th>Needs</th><th>$ left</th><th>Open</th><th>Max</th></tr></thead>
         <tbody id="teams"></tbody></table>
-        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. Amber above means my own money is that guess &mdash; restart with --budget SLOT=AMOUNT to key the real one.</div>
+        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. Amber above means a figure built on one of these guesses: my own money when MY slot is starred, and my max bid whenever any keeper team's is &mdash; that number is computed from all twelve budgets, not just mine. Restart with --budget SLOT=AMOUNT to key the real ones, where SLOT is the DRAFT slot in the first column, not a roster id.</div>
       </div>
       <div class="panel" style="margin-top:12px">
         <h2>Recent sales</h2>
@@ -238,15 +242,25 @@ function renderNomination(s) {
   put('high-bid-sub', nom.offering_slot != null ? 'slot ' + nom.offering_slot : '');
   put('worth', analysis ? dollars(analysis.worth) : '—');
   put('room-price', analysis && analysis.room_price != null ? dollars(analysis.room_price) : '—');
-  put('max-bid', analysis ? dollars(analysis.max_bid) : '—');
-  // my_cap is my budget minus what I have spent, so it inherits a
-  // budget nobody entered. Mark it where it shows, not in a legend.
+  // The 30px figure IS the number read under a bid timer, and it is a
+  // guess in two independent ways. My own budget feeds my_cap and the
+  // pace schedule; the ROOM's budgets feed inflation and the pace pool,
+  // so a fabricated budget on a keeper team I do not own still moves
+  // this number. Either one marks the tile — the amber sub-line alone
+  // pointed at the cap, which is usually not the binding constraint.
   var guessedBudget = !!(s.me && s.me.budget_is_default);
+  var guessedRoom = !!(s.defaulted_keeper_slots && s.defaulted_keeper_slots.length);
+  var maxEl = document.getElementById('max-bid');
+  maxEl.textContent = analysis ? dollars(analysis.max_bid) : '—';
+  maxEl.className = 'value num' + (guessedBudget || guessedRoom ? ' guessed' : '');
   var capEl = document.getElementById('max-bid-sub');
   capEl.textContent = analysis
-    ? 'cap ' + dollars(analysis.my_cap) + (guessedBudget ? ' (default)' : '') + ' · infl ×' + analysis.inflation.toFixed(2)
+    ? (guessedBudget ? 'BUDGET NOT ENTERED · ' : '') +
+      'cap ' + dollars(analysis.my_cap) +
+      ' · infl ×' + analysis.inflation.toFixed(2) +
+      (guessedRoom ? ' (room default ×' + s.defaulted_keeper_slots.length + ')' : '')
     : '';
-  capEl.className = 'sub' + (analysis && guessedBudget ? ' guessed' : '');
+  capEl.className = 'sub' + (analysis && (guessedBudget || guessedRoom) ? ' guessed' : '');
 
   var verdictEl = document.getElementById('verdict');
   if (nom.verdict) {
@@ -335,7 +349,11 @@ function renderMe(s) {
   var guessed = !!me.budget_is_default;
   moneyEl.textContent = dollars(me.remaining);
   moneyEl.className = 'money num' + (guessed ? ' guessed' : '');
-  capsEl.textContent = 'max bid ' + dollars(me.max_bid) + ' · ' + me.open_slots +
+  // The draft slot leads the line on purpose: it is the number --budget
+  // is keyed by, and it is NOT the roster id — this league permutes the
+  // two when it assigns the draft order.
+  capsEl.textContent = 'draft slot ' + me.slot + ' · max bid ' + dollars(me.max_bid) +
+    ' · ' + me.open_slots +
     ' open · needs ' + (needsText(me.needs) || '—') +
     (guessed ? ' · BUDGET NOT ENTERED: shown at the league default' : '');
   capsEl.className = 'caps' + (guessed ? ' guessed' : '');

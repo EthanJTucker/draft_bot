@@ -45,6 +45,7 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     error: str | None,
     *,
     budget_is_default: bool = False,
+    my_slot: int | None = None,
 ) -> tuple[dict | None, str]:
     """The plain BID/PASS call, deliberately simple (nuance is the
     engine's job): BID exactly when the current high bid is BELOW my max
@@ -61,12 +62,19 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
 
     The budget rule is deliberately narrow, and the narrowness is the
     point. It reads MY slot only, and it clears as soon as that slot
-    carries real money from either source (a Sleeper key or the
-    operator's ``--budget`` override). Suppressing on any defaulted slot
-    in the room would blank the tool for every lot of a draft whose
-    commissioner never enters budgets — no tool at all, which is worse
-    than a labeled one. The room's other defaulted slots stay visible as
-    the standing settings banner and the per-team flag.
+    carries real money from either source (the operator's ``--budget``
+    override or a Sleeper key). Suppressing on any defaulted slot in the
+    room would blank the tool for every lot of a draft whose commissioner
+    never enters budgets — no tool at all, which is worse than a labeled
+    one.
+
+    The narrowness has a real cost and it is NOT hidden. ``max_bid`` and
+    ``inflation`` are functions of all twelve budgets, so keying my slot
+    alone clears the verdict while the recommended number still rides the
+    room's fabricated money. That is what ``defaulted_keeper_slots`` in
+    the snapshot is for: the page renders the max bid amber and qualifies
+    it as a room default while any keeper-holding slot is still uncovered,
+    on top of the standing settings banner and the per-team flag.
     """
     if paused:
         return None, "draft paused"
@@ -81,10 +89,19 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     if high_bid is None:
         return None, "no recorded high bid for this lot; not advising on suspect data"
     if budget_is_default:
+        # Name the slot. "--budget SLOT=AMOUNT" is unactionable at a
+        # 10-second timer, and worse than unactionable if the operator
+        # reaches for his roster id: this league permutes slot and roster
+        # id when it assigns the draft order, so the two are different
+        # numbers on draft night. Interpolating the RESOLVED draft slot
+        # turns the reason into the exact command.
+        slot_key = "<slot>" if my_slot is None else str(my_slot)
+        flag_key = "SLOT" if my_slot is None else str(my_slot)
         return None, (
-            "my budget is the league-wide default, not a real one "
-            "(Sleeper carries no budget_<slot> for my slot); pass "
-            "--budget SLOT=AMOUNT to advise"
+            f"my budget is the league-wide default, not a real one "
+            f"(Sleeper carries no budget_{slot_key} key for my draft "
+            f"slot); pass --budget {flag_key}=AMOUNT (DRAFT slot, not "
+            "roster id) to advise"
         )
     action = "BID" if high_bid < analysis["max_bid"] else "PASS"
     label = "final" if status == NOMINATION_SOLD_GRACE else "live"
@@ -224,6 +241,7 @@ class DashboardPoller:
             "timer_end_at": board.timer_end_at,
             "nomination": self._nomination_json(board, my_slot),
             "teams": [self._team_json(team, my_slot) for team in board.teams],
+            "defaulted_keeper_slots": self._defaulted_keeper_slots(board),
             "me": self._me_json(board, my_slot),
             "players": self._players_json(board),
             "sales": [self._sale_json(sale) for sale in board.sales],
@@ -250,6 +268,7 @@ class DashboardPoller:
             analysis,
             error,
             budget_is_default=self._budget_is_default(board, my_slot),
+            my_slot=my_slot,
         )
         if verdict is not None and "draft" in board.stale_endpoints:
             # The draft object is the ONLY carrier of the nomination
@@ -298,6 +317,26 @@ class DashboardPoller:
         if my_slot is None:
             return False
         return board.team(my_slot).budget_is_default
+
+    def _defaulted_keeper_slots(self, board: BoardState) -> list[int]:
+        """Keeper-holding slots whose money on this board is the
+        league-wide default, in slot order.
+
+        The ROOM, not my slot. ``analysis.max_bid`` and ``inflation`` are
+        functions of all twelve budgets (the engine sums the room's money
+        and the other eleven teams' remaining), so a fabricated budget
+        anywhere in the keeper room degrades my recommended number even
+        when my own slot carries real money. Keying on keeper-holding
+        slots is deliberate: a defaulted budget is only provably WRONG
+        for a team that kept players, and marking every defaulted slot
+        would paint a permanent amber warning on a keeper-free board that
+        carries no fabricated money at all.
+        """
+        return [
+            team.slot
+            for team in board.teams
+            if team.budget_is_default and self._keepers_by_slot.get(team.slot)
+        ]
 
     def _analysis_for(
         self, board: BoardState, my_slot: int | None
