@@ -241,9 +241,33 @@ wrong budget stays wrong to the last lot). Any slot in that state is
 marked, and my own defaulted budget suppresses the verdict rather than
 advising off a number the tool made up. `--budget SLOT=AMOUNT` keys the
 real figures by hand from the league sheet, repeatably
-(`--budget 7=96 --budget 3=143`); a live Sleeper key always wins over a
-hand-keyed one. AMOUNT is a whole-draft budget, the same quantity
-`budget_<slot>` carries. The suppression is per-slot on purpose: keying
-my own slot restores my verdict even while the rest of the room is still
-uncovered, because a tool that blanks for all 180 lots would be worse
-than one that shows a labeled figure.
+(`--budget 4=96 --budget 11=143`). AMOUNT is the team's post-keeper money
+for the whole draft, the same quantity `budget_<slot>` carries, not a
+running balance.
+
+SLOT is the **draft slot**, which is not the roster id. Sleeper assigns
+draft order at draft time and the two identifiers then differ: every
+completed season in this league maps them differently. The My-team panel
+names my draft slot, the team table's first column is the draft slot, and
+startup echoes every override it parsed. If overrides are given while my
+own resolved slot still has real money from neither source, startup says
+so and names the slot to use.
+
+Precedence: an explicit `--budget` beats a live `budget_<slot>` key,
+which beats the `[auction] budget` default. Operator input outranks
+remote data because the case this lever exists for is a commissioner who
+enters the flat league budget for twelve keeper teams: every key is
+present, nothing is flagged, and every number is still fiction. Under the
+other ordering there is no lever at all. Replacing a figure Sleeper
+actually supplied is never silent, though: a standing banner names the
+slot and both amounts, as does an override a keeper roster provably
+cannot afford.
+
+The verdict suppression is per-slot on purpose. Keying my own slot
+restores my verdict even while the rest of the room is uncovered, because
+a tool that blanks for all 180 lots would be worse than one that shows a
+labeled figure. That narrowness has a cost, and the page shows it: my max
+bid is computed from all twelve budgets (inflation and the pace pool both
+read the whole room), so it renders amber and reads `(room default)` for
+as long as any keeper team's money is still fabricated, even after my own
+verdict has come back.
