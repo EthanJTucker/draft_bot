@@ -281,8 +281,11 @@ re-resolves correctly from the live board. The keeper counts stay on the
 seats the old order gave them, so the page raises a banner naming the
 slots that moved and stops advising. It also marks the figures built on
 that seating rather than leaving them to read as facts: my max bid, my
-remaining money, my caps line and my roster list all go amber and carry
-`OLD DRAFT ORDER — RESTART`. The money in them is real, so this is not
+remaining money, my caps line and my roster list all go amber, and three
+of those carry the words `OLD DRAFT ORDER — RESTART` — the sub-line under
+the max bid, the caps line itself, and a note above the roster. My
+remaining money goes amber with no wording of its own, and reads against
+those three. The money in them is real, so this is not
 the budget wording; what moved is the seating behind it. **The remedy is
 a restart**, which rebuilds the bridge against the order now in force.
 Launching after the order is dealt never reaches this, and neither does

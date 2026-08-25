@@ -62,7 +62,7 @@ def _verdict(  # pylint: disable=too-many-return-statements  # one return
     one. A just-sold lot (within grace) keeps its verdict as the
     retrospective call the bot was making when the hammer fell.
 
-    The stale-bridge rule is FIRST, ahead of the five that predate it and
+    The stale-bridge rule is FIRST, ahead of the six that predate it and
     without reordering any of them. Every other rule describes this lot or
     this feed, clears itself as the draft moves on, and leaves the rest of
     the page true; that one says the keeper lists behind the rosters, the

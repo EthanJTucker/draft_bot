@@ -638,7 +638,7 @@ def test_the_order_landing_mid_session_stops_the_live_dashboard(tmp_path):
     The mis-attribution is measured on both sides of the deal, so the
     banner is pinned against a real failure. The withheld reason is the
     RESTART one and not "no nomination data", which is where this rule
-    sits in the fail-closed order: ahead of all five that came before it,
+    sits in the fail-closed order: ahead of all six that came before it,
     because they describe one lot while this describes the whole board.
     """
     transport = _live_transport(_three_keeper_rosters(), slots=IDENTITY_SLOTS)

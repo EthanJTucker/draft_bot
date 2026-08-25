@@ -21,9 +21,11 @@ else about the page. Specifically invisible to it:
   anywhere all leave every asserted declaration byte-identical and
   repaint the page.
 
-  Counting is what closes any of these. The asserts below hold
-  ``--amber``, ``#banners {``, ``.banner {``, ``.banner.amber`` and the
-  four ``.guessed`` mark SELECTORS at one occurrence each. Four
+  Counting is the only tool with any purchase here, and it reaches only
+  some of these; the section below says why no list of what it misses
+  can be finished. The asserts below hold ``--amber``, ``#banners {``,
+  ``.banner {``, ``.banner.amber`` and the four ``.guessed`` mark
+  SELECTORS at one occurrence each. Four
   selectors in three rules: ``#my-team .money.guessed, #my-team
   .caps.guessed`` is a single rule carrying two of them, and counting
   the rule count instead left ``.caps.guessed`` free — appending it in
@@ -68,12 +70,14 @@ else about the page. Specifically invisible to it:
   retargeting the ``innerHTML`` or ``put`` it feeds. Two call sites and
   five sinks are pinned below; every other sink is not.
 * ELEMENT COVERAGE. The script queries 26 ids; the id list below names
-  12. ``my-remaining``, ``my-caps``, ``my-roster``, ``max-bid-sub`` and
-  ``verdict-sub`` are among the fourteen it omits. The writes into
-  ``my-roster``, ``max-bid-sub`` and ``verdict-sub`` are pinned as sinks
-  below — named, not counted from either end of that list, so moving a
-  name cannot quietly make this sentence false. ``my-remaining`` and
-  ``my-caps`` are not pinned at all.
+  12 of them. That list has 13 entries: ``my-team`` is styling-only and
+  the script never queries it, so it is not one of the 26 and does not
+  count against them. ``my-remaining``, ``my-caps``, ``my-roster``,
+  ``max-bid-sub`` and ``verdict-sub`` are among the fourteen it omits.
+  The writes into ``my-roster``, ``max-bid-sub`` and ``verdict-sub`` are
+  pinned as sinks below — named, not counted from either end of that
+  list, so moving a name cannot quietly make this sentence false.
+  ``my-remaining`` and ``my-caps`` are not pinned at all.
 
 The disposition is deliberate: write the limit down rather than keep
 adding pins that cannot reach it, and do not stand up a JavaScript test
