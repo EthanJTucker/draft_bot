@@ -6,7 +6,10 @@ on top of the static value sheet, recomputed from scratch on every call:
 - **Positional inflation** — remaining room money over remaining sheet
   value, per position, with off-model sales excluded and the multiplier
   tapered away from the cheap tail (measured keeper-league inflation
-  concentrates above roughly the 130th player).
+  concentrates above roughly the 130th player). One-directional today:
+  ``INFLATION_MIN`` is 1.0, so the layer can raise a price and never
+  lower one. See the constant for the measurement and for the reason
+  the deflation half is off.
 - **Marginal roster need** — best legal lineup with the player minus
   without, honoring FLEX eligibility. A discount schedule, never a
   premium: a scarce starter keeps the full inflation-adjusted price,
@@ -46,9 +49,39 @@ TAPER_FULL_RANK = 110
 #: the $1-5 tail trades at floor prices whatever the room's money does).
 TAPER_ZERO_RANK = 150
 
-#: Sanity clamp on the per-position ratio: a depleted denominator late in
-#: the draft must not emit an absurd multiplier.
-INFLATION_MIN = 0.25
+#: Clamp on the per-position ratio. The ceiling is the original sanity
+#: bound: a depleted denominator late in the draft must not emit an
+#: absurd multiplier.
+#:
+#: The FLOOR is a measured value, and it is doing more than sanity work.
+#: It was 0.25, and on the 2025 replay 84 of the 159 scored lots priced
+#: at exactly that clamp — an expensive mid-draft nominee displaying at
+#: roughly a quarter of his real price. Sweeping the replay across
+#: candidate floors (reports/backtest_2025.md carries the resulting
+#: numbers) showed running MAE, absolute running bias and the
+#: early/mid/late bias spread all falling monotonically as the floor
+#: rose, and all three reaching their minimum at exactly 1.0:
+#:
+#:     floor   running MAE   running bias   segment bias spread
+#:     0.25         5.5376        -5.3095               11.7962
+#:     0.50         4.8277        -4.5368               10.5453
+#:     0.85         2.6981        -1.8074                4.5583
+#:     0.95         2.3370        -0.9706                2.6970
+#:     1.00         2.2388        -0.5522                1.9351
+#:
+#: 1.00 is also the only candidate under which the monotone early-to-late
+#: bias trend stops existing rather than merely shrinking.
+#:
+#: The cost is real and deliberate: at 1.0 the engine can no longer say
+#: "this position is getting cheaper, bid less" — the deflation half of
+#: the model is discarded, not damped. The argument for paying it is that
+#: sub-1.0 is currently only reachable through the remaining-pool
+#: denominator counting sheet value the room never absorbs, and through
+#: the per-position budget split, so a below-par reading is not a market
+#: signal today. When the absorbable-pool fix lands, this floor is the
+#: first thing to re-measure: it is a bound on a known defect, not a
+#: statement about auctions.
+INFLATION_MIN = 1.0
 INFLATION_MAX = 3.0
 
 #: A player with zero lineup-marginal worth still keeps this fraction of
@@ -206,13 +239,24 @@ def inflation_adjusted_price(row: SheetRow, inflation: float) -> float:
     does), and the keeper premium — next season's money — rides through
     untouched in both directions.
 
-    Known deflation-side shape: below par (ratio < 1) the taper holds
-    the tail at sticker while the top deflates, so inside the 111-149
-    ramp a worse-ranked player can carry a slightly higher ceiling —
-    bounded (at most ~$1 after flooring on a realistic decaying worth
-    curve), never engaged on real data (across the pinned 2025 replay no
-    position's inflation ever fell below 1.0, at any sale moment), and
-    visible on any record via its inflation and rank fields."""
+    Deflation-side shape, and why it is currently unreachable: below par
+    (ratio < 1) the taper holds the tail at sticker while the top
+    deflates, so inside the 111-149 ramp a worse-ranked player could
+    carry a slightly higher ceiling — bounded (at most ~$1 after flooring
+    on a realistic decaying worth curve) and visible on any record via
+    its inflation and rank fields. ``INFLATION_MIN`` is 1.0, so
+    ``positional_inflation`` cannot emit a below-par ratio at all and the
+    inversion cannot be reached through the engine's own entry points. A
+    below-par ``inflation`` argument passed DIRECTLY to this function
+    still produces it; that is the tested contract of this function, not
+    a live behaviour of the engine.
+
+    (The claim that stood here before — that no position's inflation ever
+    fell below 1.0 across the pinned 2025 replay — was scoped to the
+    engine suite's own replay sheet, which prices every player at his
+    actual hammer price. It was never true of the backtest's honest
+    history-fit replay, where every scored lot's raw ratio runs below
+    1.0; see reports/backtest_2025.md.)"""
     discretionary = max(0.0, row.worth - FLOOR_PRICE)
     scaled = discretionary * (1.0 + taper_weight(row.rank) * (inflation - 1.0))
     return _quantize(FLOOR_PRICE + scaled + row.keeper_premium)
