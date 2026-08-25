@@ -289,6 +289,16 @@ source, and it leaves alone any slot the missing-budget banner already
 names: that is one hole, and reporting it twice is how a banner becomes
 wallpaper.
 
+The banner is not the only signal, because that money has a real
+provenance and every mark on the page would otherwise read it as
+correct. The slots it names ride the snapshot too, so the same board
+cannot say "this cannot be true" in a banner while painting the figure
+in confident green: those rows carry a `!`, my max bid goes amber and
+reads `(room IMPOSSIBLE)`, and if the slot is mine my own money and cap
+go amber and say so. The verdict is deliberately left alone. The budget
+came from a real key, so the call still renders; marking a figure and
+blanking the tool are different remedies and this is the marking one.
+
 The verdict suppression is per-slot on purpose. Keying my own slot
 restores my verdict even while the rest of the room is uncovered, because
 a tool that blanks for all 180 lots would be worse than one that shows a

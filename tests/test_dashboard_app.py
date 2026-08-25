@@ -138,7 +138,23 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # plain when the budgets are real) was checked in a browser.
     assert "!!me.budget_is_default" in page
     assert "!!(s.me && s.me.budget_is_default)" in page
-    assert "!!(s.defaulted_keeper_slots && s.defaulted_keeper_slots.length)" in page
+    # The ROOM's two faults, kept apart on purpose: money nobody entered,
+    # and money somebody entered that a keeper roster provably cannot have
+    # left. Only the second reaches the page through its own key, because
+    # its provenance is real and every other mark therefore reads it as
+    # correct. Both feed the same amber.
+    assert "var roomDefault = (s.defaulted_keeper_slots || []).length;" in page
+    assert "var roomImpossible = (s.impossible_keeper_slots || []).length;" in page
+    assert "!!(roomDefault || roomImpossible)" in page
+    # My own impossible money, and the two marks it drives.
+    assert "(s.impossible_keeper_slots || []).indexOf(me.slot) >= 0" in page
+    assert "'money num' + (guessed || myBudgetImpossible ? ' guessed' : '')" in page
+    assert "'caps' + (guessed || myBudgetImpossible ? ' guessed' : '')" in page
+    assert " · BUDGET IMPOSSIBLE: above what my keepers can leave" in page
+    assert "(room IMPOSSIBLE ×" in page
+    # The teams table's second mark and the legend clause that reads it.
+    assert "(impossibleSlots.indexOf(t.slot) >= 0 ? ' !' : '')" in page
+    assert "above what that team's keepers can possibly leave" in page
     # The amber DECLARATIONS, not merely the selectors. Repointing any of
     # these three at var(--green) / var(--dim) / var(--accent) leaves the
     # selector spelled exactly as before and neuters the mark, which is
@@ -164,7 +180,15 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # a re-assignment appended after it (`var guessed = ...; guessed =
     # false;`), which mutes every mark below while leaving all three
     # declarations above intact.
-    for flag in ("guessed", "guessedBudget", "guessedRoom"):
+    for flag in (
+        "guessed",
+        "guessedBudget",
+        "guessedRoom",
+        "roomDefault",
+        "roomImpossible",
+        "myBudgetImpossible",
+        "impossibleSlots",
+    ):
         assert page.count(flag + " = ") == 1
     # BUDGET NOT ENTERED appears TWICE in this file, on the max-bid sub
     # and on the my-team caps line, so the bare substring is satisfied by
@@ -183,6 +207,7 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # claims, so reverting it to the pre-fix wording fails here.
     assert "computed from all twelve budgets, not just mine" in page
     assert "SLOT is the DRAFT slot in the first column, not a roster id" in page
+    # HARDENING_BLOCK_PLACEHOLDER
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):

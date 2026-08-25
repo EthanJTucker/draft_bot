@@ -151,7 +151,7 @@
         <h2>Team budgets (remaining)</h2>
         <table><thead><tr><th>Slot</th><th></th><th>Needs</th><th>$ left</th><th>Open</th><th>Max</th></tr></thead>
         <tbody id="teams"></tbody></table>
-        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. Amber above means a figure built on one of these guesses: my own money when MY slot is starred, and my max bid whenever any keeper team's is &mdash; that number is computed from all twelve budgets, not just mine. Restart with --budget SLOT=AMOUNT to key the real ones, where SLOT is the DRAFT slot in the first column, not a roster id.</div>
+        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. ! budget entered, but above what that team's keepers can possibly leave: not a guess, a figure that cannot be true, named with its source in the banner. Amber above means a figure built on one of these: my own money when MY slot carries either mark, and my max bid whenever any keeper team's does &mdash; that number is computed from all twelve budgets, not just mine. Restart with --budget SLOT=AMOUNT to key the real ones, where SLOT is the DRAFT slot in the first column, not a roster id.</div>
       </div>
       <div class="panel" style="margin-top:12px">
         <h2>Recent sales</h2>
@@ -248,8 +248,14 @@ function renderNomination(s) {
   // so a fabricated budget on a keeper team I do not own still moves
   // this number. Either one marks the tile — the amber sub-line alone
   // pointed at the cap, which is usually not the binding constraint.
+  // Two different faults, both of which move this figure. A room budget
+  // nobody entered is a guess; one somebody entered that a keeper roster
+  // provably cannot have left is a proven-wrong number wearing a real
+  // provenance, so nothing else on the page marks it.
   var guessedBudget = !!(s.me && s.me.budget_is_default);
-  var guessedRoom = !!(s.defaulted_keeper_slots && s.defaulted_keeper_slots.length);
+  var roomDefault = (s.defaulted_keeper_slots || []).length;
+  var roomImpossible = (s.impossible_keeper_slots || []).length;
+  var guessedRoom = !!(roomDefault || roomImpossible);
   var maxEl = document.getElementById('max-bid');
   maxEl.textContent = analysis ? dollars(analysis.max_bid) : '—';
   maxEl.className = 'value num' + (guessedBudget || guessedRoom ? ' guessed' : '');
@@ -258,7 +264,8 @@ function renderNomination(s) {
     ? (guessedBudget ? 'BUDGET NOT ENTERED · ' : '') +
       'cap ' + dollars(analysis.my_cap) +
       ' · infl ×' + analysis.inflation.toFixed(2) +
-      (guessedRoom ? ' (room default ×' + s.defaulted_keeper_slots.length + ')' : '')
+      (roomDefault ? ' (room default ×' + roomDefault + ')' : '') +
+      (roomImpossible ? ' (room IMPOSSIBLE ×' + roomImpossible + ')' : '')
     : '';
   capEl.className = 'sub' + (analysis && (guessedBudget || guessedRoom) ? ' guessed' : '');
 
@@ -326,9 +333,11 @@ function needsText(needs) {
   return keys.map(function (k) { return k + ':' + needs[k]; }).join(' ');
 }
 function renderTeams(s) {
+  var impossibleSlots = s.impossible_keeper_slots || [];
   document.getElementById('teams').innerHTML = (s.teams || []).map(function (t) {
     return '<tr class="' + (t.is_me ? 'me-row' : '') + '"><td class="num">' + t.slot +
-      '</td><td>' + (t.is_me ? 'ME' : '') + (t.budget_is_default ? ' *' : '') + '</td>' +
+      '</td><td>' + (t.is_me ? 'ME' : '') + (t.budget_is_default ? ' *' : '') +
+      (impossibleSlots.indexOf(t.slot) >= 0 ? ' !' : '') + '</td>' +
       '<td class="needs">' + esc(needsText(t.needs)) + '</td>' +
       '<td class="num">' + dollars(t.remaining) + '</td><td class="num">' + t.open_slots +
       '</td><td class="num">' + dollars(t.max_bid) + '</td></tr>';
@@ -346,17 +355,24 @@ function renderMe(s) {
   // Remaining and max bid are both budget minus spend. When the budget
   // is the league default rather than a real one they are guesses, and
   // a guess must never render as the confident green number.
+  // A budget the ceiling banner just proved impossible is a REAL key, so
+  // budget_is_default reads false and this money would otherwise render
+  // in confident 34px green on the same screen as the banner calling it
+  // impossible. Marking the figure is not the same as blanking the
+  // verdict, and only the figure is marked here.
   var guessed = !!me.budget_is_default;
+  var myBudgetImpossible = (s.impossible_keeper_slots || []).indexOf(me.slot) >= 0;
   moneyEl.textContent = dollars(me.remaining);
-  moneyEl.className = 'money num' + (guessed ? ' guessed' : '');
+  moneyEl.className = 'money num' + (guessed || myBudgetImpossible ? ' guessed' : '');
   // The draft slot leads the line on purpose: it is the number --budget
   // is keyed by, and it is NOT the roster id — this league permutes the
   // two when it assigns the draft order.
   capsEl.textContent = 'draft slot ' + me.slot + ' · max bid ' + dollars(me.max_bid) +
     ' · ' + me.open_slots +
     ' open · needs ' + (needsText(me.needs) || '—') +
-    (guessed ? ' · BUDGET NOT ENTERED: shown at the league default' : '');
-  capsEl.className = 'caps' + (guessed ? ' guessed' : '');
+    (guessed ? ' · BUDGET NOT ENTERED: shown at the league default' : '') +
+    (myBudgetImpossible ? ' · BUDGET IMPOSSIBLE: above what my keepers can leave' : '');
+  capsEl.className = 'caps' + (guessed || myBudgetImpossible ? ' guessed' : '');
   document.getElementById('my-roster').innerHTML = (me.roster || []).map(function (p) {
     return '<li><span class="pos">' + esc(p.position || '?') + '</span><span>' + esc(p.name) +
       (p.keeper ? ' (K)' : '') + '</span><span class="price num">' + (p.price == null ? '' : dollars(p.price)) + '</span></li>';

@@ -161,6 +161,24 @@ def diff_settings(
     return tuple(mismatches)
 
 
+def _ceiling_warnings(breaches: Sequence[tuple[int, str]]) -> list[SettingsMismatch]:
+    """The IMPOSSIBLE banner over ``DraftTracker._ceiling_breaches``.
+
+    One banner naming every breaching slot, never one per slot: the whole
+    point of the ceiling rule is that impossible money is rare and loud,
+    and a column of near-identical banners is how loud becomes wallpaper.
+    """
+    if not breaches:
+        return []
+    return [
+        SettingsMismatch(
+            field="budget_ceiling",
+            expected="a keeper team's budget cannot exceed its ceiling",
+            actual="; ".join(message for _, message in breaches),
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class Sale:
     """One completed sale as the board carries it: id, price, and buying
@@ -193,6 +211,11 @@ class BoardState:
     # Every sale in feed order (off_model_player_ids is the flagged subset).
     sales: tuple[Sale, ...] = ()
     timer_end_at: int | None = None
+    # Keeper slots the ceiling banner just proved impossible, in slot
+    # order. Provenance alone cannot carry this: a ceiling-breaching
+    # Sleeper key IS a real key, so budget_is_default reads False and the
+    # render layer would paint proven-wrong money like correct money.
+    impossible_keeper_slots: tuple[int, ...] = ()
 
     def team(self, slot: int) -> TeamState:
         """The team drafting from ``slot``."""
@@ -282,12 +305,16 @@ class DraftTracker:
             and len(tick.picks) >= self._observed_sales
         )
         sold = {pick.player_id for pick in tick.picks}
+        # Computed once and used twice, so the banner's wording and the
+        # page's marks can never name different slots.
+        breaches = self._ceiling_breaches(tick.draft)
         return BoardState(
             status=tick.draft.status,
             paused=tick.draft.paused,
             teams=tuple(self._team_state(slot, tick) for slot in self._slots(tick)),
             nomination=self._resolve_nomination(tick.draft, sold, picks_trusted),
-            settings_warnings=self._settings_warnings(tick.draft),
+            settings_warnings=self._settings_warnings(tick.draft, breaches),
+            impossible_keeper_slots=tuple(slot for slot, _ in breaches),
             off_model_player_ids=self._off_model(tick),
             stale_endpoints=tick.stale_endpoints,
             sales=tuple(
@@ -308,7 +335,9 @@ class DraftTracker:
             if pick.player_id not in self._value_sheet
         )
 
-    def _settings_warnings(self, draft: DraftState) -> tuple[SettingsMismatch, ...]:
+    def _settings_warnings(
+        self, draft: DraftState, breaches: Sequence[tuple[int, str]]
+    ) -> tuple[SettingsMismatch, ...]:
         """Assumption diffs, the pre-entry keeper condition, the real
         budget a hand-keyed ``--budget`` override discards, and money no
         keeper roster could have left over — none of which the operator
@@ -316,7 +345,7 @@ class DraftTracker:
         warnings = list(diff_settings(draft, self._expected_settings))
         warnings.extend(self._keeper_budget_warnings(draft))
         warnings.extend(self._override_warnings(draft))
-        warnings.extend(self._ceiling_warnings(draft))
+        warnings.extend(_ceiling_warnings(breaches))
         return tuple(warnings)
 
     def uncovered_keeper_slots(self, draft: DraftState) -> tuple[int, ...]:
@@ -412,10 +441,9 @@ class DraftTracker:
             return draft.budget_by_slot[slot], BUDGET_FROM_SLEEPER
         return self._config.auction_budget, BUDGET_FROM_DEFAULT
 
-    def _ceiling_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
-        """The IMPOSSIBLE banner: a keeper team's budget above what its
-        roster can possibly leave is provably wrong, not merely
-        unverified.
+    def _ceiling_breaches(self, draft: DraftState) -> list[tuple[int, str]]:
+        """Every keeper slot whose budget is IMPOSSIBLE, as (slot,
+        message) in slot order: provably wrong, not merely unverified.
 
         Keeper cost is bounded below by the config's floor, so a slot
         holding N keepers cannot carry more than ``budget - floor * N`` of
@@ -437,10 +465,15 @@ class DraftTracker:
         The CLI cannot make this check — it parses before the network on
         purpose, and keeper lists arrive with the rosters — so it lands
         here, where both facts are in hand.
+
+        The slots travel out beside the message because the banner is not
+        enough on its own: the same figure it calls impossible carries a
+        real provenance, so every mark on the page reads it as confident
+        money unless this set says otherwise.
         """
         floor = self._config.keeper_cost_floor
         uncovered = set(self.uncovered_keeper_slots(draft))
-        impossible = []
+        breaches = []
         for slot, keepers in sorted(self._keepers_by_slot.items()):
             if not keepers:
                 continue
@@ -448,25 +481,20 @@ class DraftTracker:
             if slot in uncovered:
                 # THE CARVE-OUT. This slot's money is the league default,
                 # which breaches the ceiling on any keeper roster — but
-                # the keeper_budgets banner already names it, by slot.
-                # One hole, one banner.
+                # the keeper_budgets banner already names it, by slot,
+                # and provenance already marks it. One hole, one banner.
                 continue
             ceiling = self._config.auction_budget - floor * len(keepers)
             if amount > ceiling:
-                impossible.append(
-                    f"slot {slot} = ${amount} ({source}) against a ceiling "
-                    f"of ${ceiling} ({len(keepers)} keeper(s) at the "
-                    f"${floor} floor)"
+                breaches.append(
+                    (
+                        slot,
+                        f"slot {slot} = ${amount} ({source}) against a "
+                        f"ceiling of ${ceiling} ({len(keepers)} keeper(s) "
+                        f"at the ${floor} floor)",
+                    )
                 )
-        if not impossible:
-            return []
-        return [
-            SettingsMismatch(
-                field="budget_ceiling",
-                expected="a keeper team's budget cannot exceed its ceiling",
-                actual="; ".join(impossible),
-            )
-        ]
+        return breaches
 
     def _resolve_nomination(
         self, draft: DraftState, sold: set[str], picks_trusted: bool

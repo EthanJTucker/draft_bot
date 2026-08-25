@@ -503,6 +503,13 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         # which defaulted slots are provably wrong rather than merely
         # unentered.
         "defaulted_keeper_slots",
+        # A deliberate addition too, and a SIBLING of the key above rather
+        # than more entries in it. Those slots show money nobody entered,
+        # which provenance already marks; these show money somebody DID
+        # enter and that a keeper roster provably cannot have left, which
+        # provenance calls real. Merging them would make one of the page's
+        # two captions a lie.
+        "impossible_keeper_slots",
         "me",
         "players",
         "sales",
@@ -511,6 +518,11 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
     }
     # Slot 3 is the uncovered keeper team; slot 7 has a real key.
     assert state["defaulted_keeper_slots"] == [3]
+    # And non-empty here, which is the point of pinning it in the contract
+    # fixture: slot 7's real budget_7 key of $200 is above the $195 its one
+    # keeper leaves, so the ceiling banner names it while its provenance
+    # stays real. The two keys hold DIFFERENT slots on this one board.
+    assert state["impossible_keeper_slots"] == [7]
     nomination = state["nomination"]
     assert set(nomination) == {
         "status",

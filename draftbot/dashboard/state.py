@@ -236,6 +236,11 @@ class DashboardPoller:
             "nomination": self._nomination_json(board, my_slot),
             "teams": [self._team_json(team, my_slot) for team in board.teams],
             "defaulted_keeper_slots": self._defaulted_keeper_slots(board),
+            # The ceiling banner's own set, verbatim. A sibling key rather
+            # than more entries in the one above: those slots show money
+            # nobody entered, these show money somebody DID enter and
+            # cannot be true, and the page says which on the caps line.
+            "impossible_keeper_slots": list(board.impossible_keeper_slots),
             "me": self._me_json(board, my_slot),
             "players": self._players_json(board),
             "sales": [self._sale_json(sale) for sale in board.sales],

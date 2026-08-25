@@ -487,3 +487,45 @@ def test_the_room_flag_marks_fabricated_keeper_money_and_only_that(config):
     assert partial["me"]["budget_is_default"] is False
     assert partial["nomination"]["verdict"] is not None
     assert partial["defaulted_keeper_slots"] == [3]
+
+
+def test_an_impossible_keeper_budget_is_marked_and_not_merely_announced(config):
+    """The ceiling banner's proof reaches the page's marking feeds.
+
+    The flat-league-budget board is the one this whole family exists for:
+    every ``budget_<slot>`` key present at $200, my slot 7 holding three
+    keepers that cannot leave more than $185. The banner says the figure
+    is impossible, and until now every mark disagreed with it — my money
+    green, my cap unmarked, the 30px max bid in confident accent blue.
+    ``impossible_keeper_slots`` is what the page reads to mark them.
+
+    ANTI-CHEAT on the two quiet boards, because a mark on every board is
+    the wallpaper this issue is about: nothing entered at all stays empty
+    (the keeper_budgets banner owns that hole, and the default is already
+    marked by provenance), and a real affordable figure stays empty too.
+
+    The verdict is deliberately NOT touched. My budget came from a real
+    key, so ``budget_is_default`` stays False and the call still renders;
+    marking a figure and blanking the tool are different remedies, and
+    this is the marking one."""
+    rows = _keeper_board_rows()
+
+    flat = _keeper_board_poller(config, rows, budgets=ENTERED_BUDGETS).step()
+    (ceiling,) = _banners(flat, "budget_ceiling")
+    assert "slot 7 = $200" in ceiling["actual"]
+    assert flat["impossible_keeper_slots"] == [7]
+    assert flat["me"]["slot"] == 7
+    # Untouched: a real key is a real key, and the call still renders.
+    assert flat["me"]["budget_is_default"] is False
+    assert flat["nomination"]["verdict"] is not None
+    # Not the room-default mark either; these are different faults.
+    assert flat["defaulted_keeper_slots"] == []
+
+    unentered = _keeper_board_poller(config, rows).step()
+    assert unentered["impossible_keeper_slots"] == []
+    assert not _banners(unentered, "budget_ceiling")
+    assert unentered["defaulted_keeper_slots"] == [7]
+
+    affordable = _keeper_board_poller(config, rows, overrides={7: 96}).step()
+    assert affordable["impossible_keeper_slots"] == []
+    assert not _banners(affordable, "budget_ceiling")

@@ -283,6 +283,46 @@ def test_the_ceiling_reads_sleepers_own_key_too_but_not_the_default(config):
     assert not [w for w in real.settings_warnings if w.field == "budget_ceiling"]
 
 
+def test_the_impossible_slots_ride_the_board_with_the_banner(config):
+    """The banner proves a figure impossible; the board hands the page the
+    slots it named, so the proof can reach the marks.
+
+    Provenance alone cannot express this. A ceiling-breaching Sleeper key
+    IS a real key, so ``budget_is_default`` reads False and the page paints
+    the figure as confidently as any correct one — a board that says "this
+    cannot be true" in a banner while painting the same money green.
+
+    ANTI-CHEAT that this list is the banner's OWN set and not a
+    re-derivation. Slot 5 carries a real $200 key against a $185 ceiling
+    and is named. Slot 6 holds the same three keepers and resolves to the
+    same $200, but from the default, so the carve-out leaves it to the
+    keeper_budgets banner and it must NOT appear here. An implementation
+    that prices every keeper slot's resolved budget, or one that keys on
+    ``budget_is_default``, reports slot 6 and fails.
+
+    The provenance flag itself stays untouched on purpose: widening it
+    would suppress the verdict, and a tool that blanks is worse than one
+    that marks."""
+    keepers = {5: ("K1", "K2", "K3"), 6: ("K4", "K5", "K6")}
+    board = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 200})
+    )
+
+    assert board.impossible_keeper_slots == (5,)
+    (warning,) = [w for w in board.settings_warnings if w.field == "budget_ceiling"]
+    assert "slot 5" in str(warning.actual)
+    assert "slot 6" not in str(warning.actual)
+    assert board.team(5).budget_is_default is False
+
+    nothing = DraftTracker(config, keepers_by_slot=keepers).update(_tick())
+    assert not nothing.impossible_keeper_slots
+
+    affordable = DraftTracker(config, keepers_by_slot=keepers).update(
+        _tick(settings={"budget_5": 185, "budget_6": 106})
+    )
+    assert not affordable.impossible_keeper_slots
+
+
 def test_nominee_in_the_sold_set_never_renders_live(config):
     """Anti-cheat: the stale pointer can lag MORE than one lot. This nominee
     was sold two picks ago, so a guard that only string-compares against the
