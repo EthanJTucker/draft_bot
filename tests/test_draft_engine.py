@@ -148,6 +148,29 @@ class TestPositionalInflation:
         assert extreme["RB"] == INFLATION_MIN
         assert mild["WR"] == pytest.approx(1.0)
 
+    def test_a_depleted_pool_is_held_at_the_ceiling(self):
+        """The other clamp, which nothing else in the suite reaches.
+
+        rb1 and rb2 (worth \\$40 and \\$30) go for \\$2 each: $2 of
+        discretionary money leaves the room while $68 of RB value leaves
+        the board, so the raw ratio is 85/19 = 4.4737 — the depleted
+        denominator ``INFLATION_MAX`` exists to bound. Emitted 3.0, so
+        rb3 displays at \\$58 rather than the \\$86 the raw ratio would
+        price him at. Both directions are asserted: a ceiling deleted
+        from the clamp emits 4.4737 and fails the second assertion, and
+        a ceiling raised out of reach fails the first, which is what a
+        census over a fixture that never bites cannot do."""
+        rows = _inflation_rows()
+        board = _par_board([Sale("rb1", 2, 2), Sale("rb2", 2, 2)])
+        raw = (87 - 2) / 19
+        assert raw == pytest.approx(4.4736842105)
+        assert raw > INFLATION_MAX
+        inflation = positional_inflation(rows, board)
+        assert inflation["RB"] == INFLATION_MAX
+        assert inflation_adjusted_price(rows[2], inflation["RB"]) == pytest.approx(58.0)
+        assert inflation_adjusted_price(rows[2], raw) == pytest.approx(86.0)
+        assert inflation["WR"] == pytest.approx(1.0)
+
     def test_off_model_sale_moves_no_ratio(self):
         """Anti-cheat: a \\$40 sale of a player the sheet does not price
         debits the buying team's budget (the board builder derives spend
