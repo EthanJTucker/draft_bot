@@ -34,18 +34,32 @@ else about the page. Specifically invisible to it:
   specificity, one cascade level below the token — and that is what the
   four ``.guessed`` counts now stop.
 
-  WHAT COUNTING CANNOT REACH, all of it measured green today: a rule
-  whose selector is not one of the counted ones. ``#topbar #max-bid
-  { color: var(--accent); }`` wins on specificity; the same declaration
-  with ``!important`` wins outright; and ``#max-bid``, ``#my-team`` or
-  ``.needs`` set to ``display: none`` takes the marked figure, my whole
-  panel or the roster's RESTART note off the screen entirely. Closing
-  those by string would mean counting every selector this file spells
-  and forbidding every one it does not, against an unbounded set of
-  selectors reaching the same elements and an unbounded set of
-  spellings for "hidden" (``visibility``, a zero size, a transparent
-  colour). This suite cannot carry that check, so it does not claim to.
-  Reading the computed styles in a browser is what catches them.
+  WHAT COUNTING CANNOT REACH. This is stated as a principle and not as
+  a list on purpose. Three separate reviews each found one more item
+  the previous list had missed, which is not three oversights: the
+  list cannot be finished, and every attempt to finish it shipped a
+  fresh false claim of completeness.
+
+  The principle. A count over a substring closes exactly two things:
+  deleting that substring, and adding a second copy of it spelled byte
+  for byte. EVERYTHING ELSE ESCAPES IT — not everything else named
+  below, everything else. A different selector reaching the same
+  element escapes. So does a different SPELLING of the same selector:
+  ``#max-bid[class~="guessed"]`` matches what ``#max-bid.guessed``
+  matches, at the same specificity, sharing no counted substring with
+  it. So does higher specificity, so does ``!important``, and so does
+  plain source order at equal specificity. So does every way of making
+  an element invisible rather than repainting it — ``display``,
+  ``visibility``, a zero size, a transparent colour, clipping, moving
+  it off-screen — and every way of reaching it that is not through a
+  selector this file already spells.
+
+  Those are ILLUSTRATIONS. They are not exhaustive and cannot be made
+  exhaustive: the selectors that reach a given element, the spellings
+  of any one of them, and the mechanisms that hide it are each an
+  unbounded set. So this suite does not claim to close any of it.
+  Rendering the page in a browser and reading the computed styles is
+  the only real check, and nothing added to this file replaces it.
 * A RETARGETED assignment. Sending an asserted class expression to a
   different element leaves the expression spelled exactly as pinned, and
   also survives a full green run today.
@@ -64,8 +78,9 @@ else about the page. Specifically invisible to it:
 The disposition is deliberate: write the limit down rather than keep
 adding pins that cannot reach it, and do not stand up a JavaScript test
 framework for it. **Any change to that page must be verified by
-rendering it in a browser and reading the computed styles.** Five review
-rounds have done exactly that, and this docstring is why the next must.
+rendering it in a browser and reading the computed styles.** Every
+review round so far has done exactly that, and this docstring is why the
+next must.
 """
 
 from __future__ import annotations
@@ -200,6 +215,11 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # a re-assignment appended after it (`var guessed = ...; guessed =
     # false;`), which mutes every mark below while leaving all three
     # declarations above intact.
+    # The counted substring carries its spaces, so it closes the spaced
+    # spelling and only that one: `guessed=false;` is a different string
+    # and passes. Per the module docstring, a count closes a byte-for-byte
+    # repeat of what it counts and nothing else; this is that limit in its
+    # plainest form, and no wider spelling of the count removes it.
     for flag in (
         "guessed",
         "guessedBudget",
