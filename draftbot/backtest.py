@@ -93,18 +93,28 @@ _QUANTIZE_DECIMALS = 10
 # --- margin, so a stale loose bound that a broken engine could slip    ---
 # --- under is itself a test failure.                                   ---
 
-#: Running (inflation-adjusted) estimate, overall MAE: measured 5.5376
-#: over the 159 scored lots.
-RUNNING_MAE_BOUND = 6.5
-RUNNING_MAE_MARGIN = 1.0
+#: Running (inflation-adjusted) estimate, overall MAE: measured 2.2388
+#: over the 159 scored lots — the static sheet's own number to the last
+#: decimal, because ``INFLATION_MIN = 1.0`` binds at every scored sale
+#: moment of this fixture and the running estimate lands exactly on the
+#: sheet it adjusts. Bound and margin match the static pair for the same
+#: reason; they are separate metrics that coincide today, not aliases.
+RUNNING_MAE_BOUND = 2.75
+RUNNING_MAE_MARGIN = 0.6
 
-#: Running estimate, early/mid/late bias spread: measured 11.7962
-#: (segment bias -11.81 / -2.69 / -0.02). A REGRESSION PIN of a real,
-#: explained deflation drift — NOT a no-drift certificate; see the
-#: "Findings" section of the report before trusting the early-board
-#: running estimate on draft night.
-RUNNING_DRIFT_SPREAD_BOUND = 13.0
-RUNNING_DRIFT_SPREAD_MARGIN = 1.5
+#: Running estimate, early/mid/late bias spread: measured 1.9351 (segment
+#: bias -1.71 / +0.23 / +0.06). A no-systematic-drift assertion now, not
+#: the regression pin of a known deflation drift it used to be: the
+#: raised floor removed the drift rather than bounding it.
+RUNNING_DRIFT_SPREAD_BOUND = 2.5
+RUNNING_DRIFT_SPREAD_MARGIN = 0.75
+
+#: Running estimate, worst single-segment absolute bias: measured 1.7051
+#: (the early third). The symmetric replacement for the old
+#: ``early < mid < late`` shape assertion, which pinned the defect in
+#: place — this one points at zero from both sides.
+RUNNING_SEGMENT_BIAS_BOUND = 2.25
+RUNNING_SEGMENT_BIAS_MARGIN = 0.6
 
 #: Static sheet price, overall MAE: measured 2.2388 — the history fit's
 #: calibration claim.

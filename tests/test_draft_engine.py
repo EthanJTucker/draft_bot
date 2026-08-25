@@ -15,6 +15,7 @@ import pytest
 
 from draftbot.draft_engine import (
     BENCH_RETENTION,
+    INFLATION_MIN,
     MARGIN_BASE,
     MARGIN_MIN,
     MARGIN_SLOPE,
@@ -69,24 +70,42 @@ class TestPositionalInflation:
         assert inflation["RB"] == pytest.approx(1.0)
         assert inflation["WR"] == pytest.approx(1.0)
 
-    def test_overpay_deflates_that_position_and_only_that_position(self):
-        """Anti-cheat (two mutants): rb1 (worth \\$40) sells for \\$60.
-        The RB ratio must move — $59 of discretionary money left the room
-        while only $39 of RB value left the board — and the WR ratio must
-        not move at all. A pooled implementation moves both; a static one
-        moves neither."""
-        board = _par_board([Sale("rb1", 60, 2)])
-        inflation = positional_inflation(_inflation_rows(), board)
-        assert inflation["RB"] == pytest.approx((87 - 59) / 48)
-        assert inflation["RB"] < 1.0
-        assert inflation["WR"] == pytest.approx(1.0)
+    def test_bargain_inflates_that_position_and_only_that_position(self):
+        """Anti-cheat (two mutants): rb1 (worth \\$40) sells for \\$20.
+        The RB ratio must move — only $19 of discretionary money left the
+        room while $39 of RB value left the board, so the survivors have
+        more money chasing them — and the WR ratio must not move at all.
+        A pooled implementation moves both; a static one moves neither.
 
-    def test_bargain_inflates_the_remaining_pool(self):
-        """The same sale at \\$20 leaves money chasing the survivors."""
+        The isolation check lives on the INFLATION side because the
+        deflation side no longer varies: ``INFLATION_MIN`` is 1.0, so
+        every below-par ratio reads 1.0 and a below-par fixture can no
+        longer tell a per-position implementation from a pooled one."""
         board = _par_board([Sale("rb1", 20, 2)])
         inflation = positional_inflation(_inflation_rows(), board)
         assert inflation["RB"] == pytest.approx((87 - 19) / 48)
         assert inflation["RB"] > 1.0
+        assert inflation["WR"] == pytest.approx(1.0)
+
+    def test_overpay_deflation_is_held_at_the_floor(self):
+        """The floor's whole job, and the modelling cost it buys.
+
+        rb1 (worth \\$40) sells for \\$60: the raw ratio is 28/48 = 0.583,
+        and before the floor moved that is exactly what the engine
+        emitted — a mid-draft nominee priced at 58% of his sheet value.
+        ``INFLATION_MIN = 1.0`` holds it at par instead. The cost is that
+        the deflation signal is gone, not merely damped: a \\$60 overpay
+        and a \\$87 overpay (raw ratio 0.0) now read identically. Both
+        directions asserted, so a floor quietly lowered again fails here
+        rather than silently reviving the collapse."""
+        rows = _inflation_rows()
+        mild = positional_inflation(rows, _par_board([Sale("rb1", 60, 2)]))
+        extreme = positional_inflation(rows, _par_board([Sale("rb1", 87, 2)]))
+        assert INFLATION_MIN == 1.0
+        assert mild["RB"] == INFLATION_MIN
+        assert mild["RB"] > (87 - 59) / 48  # the raw ratio, not emitted
+        assert extreme["RB"] == INFLATION_MIN
+        assert mild["WR"] == pytest.approx(1.0)
 
     def test_off_model_sale_moves_no_ratio(self):
         """Anti-cheat: a \\$40 sale of a player the sheet does not price
@@ -126,13 +145,17 @@ class TestPositionalInflation:
 
     def test_inflation_rescales_to_the_actual_room_money(self):
         """Anti-cheat for the \\$2400 assumption: identical sheet, but the
-        room's (keeper-reduced) budgets are roughly half the sheet's
+        room's (keeper-reduced) budgets are roughly double the sheet's
         normalization. The ratio must track the actual dollars — a mutant
-        that trusts the sheet's own normalization stays at 1.0."""
-        poor_room = make_board({1: 48, 2: 48}, drafted_slots=6)
-        inflation = positional_inflation(_inflation_rows(), poor_room)
-        assert inflation["RB"] == pytest.approx(84 * 0.5 / 87)
-        assert inflation["RB"] < 0.55
+        that trusts the sheet's own normalization stays at 1.0.
+
+        The fixture is a RICH room rather than the poor one it used to
+        be: a poor room now clamps at ``INFLATION_MIN`` and the mutant
+        would pass, since 1.0 is what the floor emits anyway."""
+        rich_room = make_board({1: 174, 2: 174}, drafted_slots=6)
+        inflation = positional_inflation(_inflation_rows(), rich_room)
+        assert inflation["RB"] == pytest.approx(336 * 0.5 / 87)
+        assert inflation["RB"] > 1.9
 
     def test_kept_players_never_enter_any_pool(self):
         """A kept rb1 was never buyable: the RB pool starts at \\$48 and
@@ -573,18 +596,22 @@ class TestAnalyzePlayer:
     def test_golden_quantized_values_pin_the_ten_decimal_grid(self, config):
         """Determinism beyond a self-comparison: these literals are the
         ten-decimal quantized values for a board whose RB ratio repeats
-        in decimal (28/48). Removing or loosening ``_quantize`` changes
+        in decimal (68/48). Removing or loosening ``_quantize`` changes
         the reprs — a drift the double-run tests can never see, because
-        both runs drift together."""
-        board = _par_board([Sale("rb1", 60, 2)])
+        both runs drift together.
+
+        The fixture is the BARGAIN board: the overpay board it used to
+        use now clamps at ``INFLATION_MIN``, and an exactly-1.0 ratio
+        pins nothing about the decimal grid."""
+        board = _par_board([Sale("rb1", 20, 2)])
         analysis = analyze_player("rb2", _inflation_rows(), board, config, my_slot=1)
-        assert repr(analysis.inflation) == "0.5833333333"
-        assert repr(analysis.inflation_adjusted) == "17.9166666657"
-        assert repr(analysis.need_adjusted) == "17.9166666657"
-        assert repr(analysis.spend_margin) == "2.4133333333"
-        assert repr(analysis.spend_boost) == "3.8636363638"
-        assert repr(analysis.spend_adjusted) == "45.6891919165"
-        assert analysis.max_bid == 45
+        assert repr(analysis.inflation) == "1.4166666667"
+        assert repr(analysis.inflation_adjusted) == "42.0833333343"
+        assert repr(analysis.need_adjusted) == "42.0833333343"
+        assert repr(analysis.spend_margin) == "0.9978082192"
+        assert repr(analysis.spend_boost) == "0.2272727271"
+        assert repr(analysis.spend_adjusted) == "42.2205604002"
+        assert analysis.max_bid == 42
 
     def test_double_run_is_byte_identical(self, config):
         """Determinism: the same inputs analyzed twice produce equal

@@ -24,6 +24,8 @@ from draftbot.backtest import (
     RUNNING_DRIFT_SPREAD_MARGIN,
     RUNNING_MAE_BOUND,
     RUNNING_MAE_MARGIN,
+    RUNNING_SEGMENT_BIAS_BOUND,
+    RUNNING_SEGMENT_BIAS_MARGIN,
     STATIC_BIAS_BOUND,
     STATIC_BIAS_MARGIN,
     STATIC_DRIFT_SPREAD_BOUND,
@@ -41,7 +43,7 @@ from draftbot.backtest import (
     segment_stats,
 )
 from draftbot.config import load_config
-from draftbot.draft_engine import analyze_player
+from draftbot.draft_engine import INFLATION_MAX, INFLATION_MIN, analyze_player
 from draftbot.sources import ReplaySource
 from draftbot.tracker import DraftTracker, default_expected_settings
 from draftbot.valuation import value_map
@@ -107,15 +109,24 @@ class TestReplayRecords:
 
 
 def test_estimates_are_priced_on_the_pre_sale_board(replay):
-    """The seam anti-cheat: re-drive the replay by hand and, on lots
-    where the two boards provably disagree, compare the module's records
-    against BOTH — the recorded estimate must equal the pre-sale number
-    and differ from the post-sale one. Lot 2 is the sharpest lever: a $55
-    sale my own team won, where post-sale pricing also collapses the max
-    bid from 32 to a bench-retention 7 because the player already sits on
-    my roster. The pre != post assertions keep the test honest — if the
-    boards ever stopped disagreeing, the test fails loudly instead of
-    passing vacuously."""
+    """The seam anti-cheat: re-drive the replay by hand, analyze every
+    nominee on BOTH the pre-sale and the post-sale board, and require the
+    module's record to equal the pre-sale number on every one of the 180
+    lots. Lot 2 is the sharpest lever: a $55 sale my own team won, where
+    post-sale pricing collapses the max bid from 53 to a bench-retention
+    12 because the player already sits on my roster.
+
+    THE LEVER IS THE MAX BID, NOT THE RUNNING ESTIMATE. With
+    ``INFLATION_MIN`` raised to 1.0 the floor binds on every scored lot of
+    this fixture (see ``test_the_floor_binds_on_every_scored_lot``), so
+    the inflation-adjusted column is board-INDEPENDENT here: pre and post
+    agree by construction on all 180 lots. That is the visible modelling
+    cost of the floor, pinned rather than hidden — when the
+    absorbable-pool fix lets the ratio breathe below 1.0 again, the
+    zero-disagreement assertion fails and forces the running column back
+    into the lever. The nine max-bid disagreements keep the test honest
+    in the meantime: if the boards ever stopped disagreeing at all, the
+    count fails loudly instead of passing vacuously."""
     config, rows = replay["config"], replay["rows"]
     records = replay["records"]
     source = ReplaySource(replay["data"]["draft"], replay["data"]["picks"])
@@ -126,21 +137,25 @@ def test_estimates_are_priced_on_the_pre_sale_board(replay):
     )
     board = tracker.update(source.poll())
     lot = 0
+    bid_disagreements = 0
+    running_disagreements = 0
     while board.status != "complete":
         pre_sale = board
         board = tracker.update(source.poll())
         lot += 1
-        if lot not in (2, 3, 30):
-            continue
         nominee = board.sales[-1].player_id
         pre = analyze_player(nominee, rows, pre_sale, config)
         post = analyze_player(nominee, rows, board, config)
         assert records[lot - 1].running == pre.inflation_adjusted
         assert records[lot - 1].max_bid == pre.max_bid
-        assert pre.inflation_adjusted != post.inflation_adjusted
+        bid_disagreements += pre.max_bid != post.max_bid
+        running_disagreements += pre.inflation_adjusted != post.inflation_adjusted
         if lot == 2:  # my own team's buy: the roster-collapse lever
-            assert (pre.max_bid, post.max_bid) == (32, 7)
-    assert lot == 180  # every checked lot was actually reached
+            assert (pre.max_bid, post.max_bid) == (53, 12)
+            assert pre.max_bid != post.max_bid
+    assert lot == 180  # every lot was actually reached
+    assert bid_disagreements == 9
+    assert running_disagreements == 0  # the floor's cost, pinned not hidden
 
 
 class TestGateBounds:
@@ -154,30 +169,69 @@ class TestGateBounds:
     """
 
     def test_running_mae_stays_within_the_documented_bound(self, replay):
-        """Measured 5.5376 on the committed fixtures; bound 6.50 with a
-        $1.00 margin."""
+        """Measured 2.2388 on the committed fixtures; bound 2.75 with a
+        $0.60 margin — the same pair as the static sheet, because the
+        raised floor binds on every scored lot here and the running
+        estimate lands exactly on the sheet it adjusts."""
         stats = overall_stats(replay["records"], "running")
         assert stats.mae <= RUNNING_MAE_BOUND
         assert RUNNING_MAE_BOUND - stats.mae <= RUNNING_MAE_MARGIN
 
-    def test_running_drift_spread_stays_within_the_measured_pin(self, replay):
-        """A REGRESSION PIN, deliberately not a no-drift certificate: the
-        running estimate provably deflates the early board (measured
-        segment bias -11.81 early, -2.69 mid, -0.02 late; spread 11.7962,
-        pinned at 13.00 with a $1.50 margin) because the remaining-pool
-        denominator carries sheet value the room never buys — an
-        overhang that never clears. The shape is pinned too: the bias
-        must shrink monotonically across the segments (late lots carry
-        too little taper-weighted worth for the wrong ratio to move,
-        NOT a recovering ratio), and the late board must price nearly
-        on the money."""
+    def test_running_shows_no_systematic_segment_drift(self, replay):
+        """The symmetric assertion that replaced the old monotone-drift
+        pin. With ``INFLATION_MIN`` at 0.25 the running estimate deflated
+        the early board by $11.81 a lot and the suite asserted that the
+        drift EXISTED (early < mid < late), so a corrected engine failed
+        for being correct. The claim now points at zero from both sides:
+        every segment's bias sits within a measured bound of it (measured
+        -1.71 early / +0.23 mid / +0.06 late, worst magnitude 1.7051,
+        bounded at 2.25 with a $0.60 margin) and the between-segment
+        spread is the static sheet's own 1.9351 (bound 2.50, margin
+        $0.75). The old $11.81 early bias fails both bounds."""
         segments = segment_stats(replay["records"], "running")
         spread = drift_spread(segments)
         assert spread <= RUNNING_DRIFT_SPREAD_BOUND
         assert RUNNING_DRIFT_SPREAD_BOUND - spread <= RUNNING_DRIFT_SPREAD_MARGIN
-        early, mid, late = segments
-        assert early.stats.bias < mid.stats.bias < late.stats.bias
-        assert late.stats.bias == pytest.approx(0.0, abs=0.5)
+        worst = max(abs(segment.stats.bias) for segment in segments)
+        for segment in segments:
+            assert abs(segment.stats.bias) <= RUNNING_SEGMENT_BIAS_BOUND, segment.label
+        assert RUNNING_SEGMENT_BIAS_BOUND - worst <= RUNNING_SEGMENT_BIAS_MARGIN
+
+    def test_the_floor_binds_on_every_scored_lot(self, replay):
+        """The honest clamp census, and the price of the raised floor.
+
+        The 2025 room's remaining-money-over-remaining-value ratio runs
+        below 1.0 at every one of the 159 scored sale moments (the
+        denominator counts sheet value the room never absorbs), so
+        ``INFLATION_MIN = 1.0`` binds on all of them and the running
+        estimate degenerates to the static sheet, lot for lot. Pinned
+        exactly, not glossed: the clamp IS load-bearing here, and the
+        absorbable-pool fix is what makes it stop being so. Both
+        directions are asserted, so a floor that quietly stopped biting —
+        or a ceiling that started to — fails here."""
+        scored = scored_records(replay["records"])
+        assert len(scored) == 159
+        assert sum(1 for r in scored if r.inflation == INFLATION_MIN) == 159
+        assert sum(1 for r in scored if r.inflation == INFLATION_MAX) == 0
+        assert {r.inflation for r in scored} == {1.0}
+        assert all(r.running == r.static for r in scored)
+        assert overall_stats(replay["records"], "running") == overall_stats(
+            replay["records"], "static"
+        )
+
+    def test_static_statistics_are_bit_identical_to_the_pre_floor_fit(self, replay):
+        """Tripwire for the whole change: the static column is a property
+        of the history-fit SHEET, not of the engine's dynamics, so raising
+        the inflation floor must not move it by a bit. These literals are
+        the ten-decimal values measured before the floor moved — if they
+        ever change, the sheet changed and the engine is not the
+        explanation."""
+        stats = overall_stats(replay["records"], "static")
+        assert repr(stats.mae) == "2.2388054646"
+        assert repr(stats.bias) == "-0.5522422607"
+        assert repr(drift_spread(segment_stats(replay["records"], "static"))) == (
+            "1.9351086575"
+        )
 
     def test_static_sheet_shows_no_systematic_drift(self, replay):
         """The no-systematic-drift claim holds where it is true: the
@@ -235,6 +289,7 @@ class TestReport:
             "late",
             f"{RUNNING_MAE_BOUND:.2f}",
             f"{RUNNING_DRIFT_SPREAD_BOUND:.2f}",
+            f"{RUNNING_SEGMENT_BIAS_BOUND:.2f}",
             f"{STATIC_MAE_BOUND:.2f}",
             f"{STATIC_DRIFT_SPREAD_BOUND:.2f}",
         ):
