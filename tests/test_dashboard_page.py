@@ -27,11 +27,11 @@ else about the page. Specifically invisible to it:
 * CALL SITES, and separately the DOM SINKS they write into. Most render
   pins assert a loop BODY, which survives both deleting the call and
   retargeting the ``innerHTML`` or ``put`` it feeds. Two call sites and
-  three sinks are pinned below; every other sink is not.
+  four sinks are pinned below; every other sink is not.
 * ELEMENT COVERAGE. The script queries 26 ids; the id list below names
   12. ``my-remaining``, ``my-caps``, ``my-roster``, ``max-bid-sub`` and
-  ``verdict-sub`` are among the fourteen it omits, though the write into
-  the last is pinned as a sink.
+  ``verdict-sub`` are among the fourteen it omits, though the writes into
+  the last two are pinned as sinks.
 
 The disposition is deliberate: write the limit down rather than keep
 adding pins that cannot reach it, and do not stand up a JavaScript test
@@ -128,6 +128,13 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     assert "var oldOrder = !!s.keeper_map_stale;" in page
     assert "var myOldOrder = !!s.keeper_map_stale;" in page
     assert page.count("OLD DRAFT ORDER — RESTART") == 3
+    # The count above closes the UNDER-marking direction only. Dropping
+    # the `myOldOrder ?` guard on the roster note leaves the count at 3
+    # and renders a standing RESTART instruction over every operator's
+    # roster on every board, at exit 0 — the over-marking direction, and
+    # the failure the comment beside that line argues against. So the
+    # roster note is pinned WITH its conditional, like the other four.
+    assert '(myOldOrder ? \'<li class="needs">OLD DRAFT ORDER' in page
     # The teams table's second mark, its SOURCE, and the legend clause
     # that reads it. The `!` is the only mark in this family that routes
     # through an alias, and pinning the consumer alone leaves the binding
@@ -264,10 +271,13 @@ def test_index_page_delivers_the_marks_and_banners_it_spells(config):
     #    container, and none of that sees the assignment retargeted at a
     #    detached node, or an appended `.banner { display: none; }` that
     #    hides red and amber alike while `.banner.amber` and `#banners {`
-    #    each still count 1. Three one-line edits took the banners, every
-    #    team row with its * and ! marks, and the withheld verdict's
-    #    reason off the page at exit 0, spelled above exactly as pinned.
+    #    each still count 1. Four one-line edits took the banners, every
+    #    team row with its * and ! marks, my whole roster with the RESTART
+    #    note above it, and the withheld verdict's reason off the page at
+    #    exit 0, spelled above exactly as pinned. The roster sink is here
+    #    because it now carries a mark of its own, not only the list.
     assert "document.getElementById('banners').innerHTML = out.map(" in page
     assert "document.getElementById('teams').innerHTML = (s.teams || []).map(" in page
+    assert "document.getElementById('my-roster').innerHTML =" in page
     assert "put('verdict-sub', nom.verdict_reason || '')" in page
     assert page.count(".banner {") == 1
