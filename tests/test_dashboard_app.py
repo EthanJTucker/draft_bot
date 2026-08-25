@@ -207,7 +207,36 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # claims, so reverting it to the pre-fix wording fails here.
     assert "computed from all twelve budgets, not just mine" in page
     assert "SLOT is the DRAFT slot in the first column, not a roster id" in page
-    # HARDENING_BLOCK_PLACEHOLDER
+    # The DELIVERY PATH for every mark and every banner above. Each of
+    # these five silences work this file already does while leaving every
+    # assert above spelled exactly as it is, so a green suite was
+    # compatible with an entirely unmarked, bannerless screen.
+    #
+    # 1. The token itself. Repointing --amber at the accent blue renders
+    #    every amber mark on the page as a confident one, and all three
+    #    `var(--amber)` declarations asserted above stay byte-identical.
+    #    Both ends of that swap are pinned, so neither can move.
+    assert "--amber: #ffb454;" in page
+    assert "--accent: #5aa9ff;" in page
+    # 2. The rule that paints an amber banner. A second `.banner.amber`
+    #    block setting `display: none` hides every one of them, so the
+    #    count is what is pinned, not merely the declaration.
+    assert page.count(".banner.amber") == 1
+    assert (
+        ".banner.amber { background: #3d2c10; color: var(--amber); "
+        "border: 1px solid var(--amber); }" in page
+    )
+    # 3. The loop that turns settings_warnings into banners at all.
+    #    Deleting it takes EVERY settings banner off the page, including
+    #    the budget ones this module tests through /state.
+    assert "(s.settings_warnings || []).forEach(function (w) {" in page
+    assert "out.push(['amber', 'SETTINGS DIFFER — ' + esc(w.field)" in page
+    # 4. The teams-table asterisk, as a whole expression: the bare key
+    #    name survives replacing the conditional with ''.
+    assert "(t.budget_is_default ? ' *' : '')" in page
+    # 5. The cache banner's condition. A snapshot key that is read but
+    #    never branched on is the same as one never read.
+    assert "if (s.stale_endpoints && s.stale_endpoints.length)" in page
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
