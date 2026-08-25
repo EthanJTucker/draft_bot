@@ -15,6 +15,7 @@ import pytest
 
 from draftbot.draft_engine import (
     BENCH_RETENTION,
+    INFLATION_MAX,
     INFLATION_MIN,
     MARGIN_BASE,
     MARGIN_MIN,
@@ -49,6 +50,32 @@ def _inflation_rows():
     ]
 
 
+def _uneven_inflation_rows():
+    """Deliberately UNEQUAL discretionary pools: $87 of RB above the
+    taper against $58 of WR, plus the same zero-weight tail rows. On
+    ``_inflation_rows``' matched $87/$87 pools a budget split that
+    ignores pool size reads identically to a proportional one; here the
+    two disagree, so the even-split mutant is observable."""
+    return [
+        sheet_row(1, "rb1", "RB", 40.0),
+        sheet_row(2, "rb2", "RB", 30.0),
+        sheet_row(3, "rb3", "RB", 20.0),
+        sheet_row(4, "wr1", "WR", 40.0),
+        sheet_row(5, "wr2", "WR", 20.0),
+        sheet_row(160, "rbtail", "RB", 4.0),
+        sheet_row(161, "wrtail", "WR", 4.0),
+    ]
+
+
+def _rich_uneven_board(sales=()):
+    """Two $110 teams, six drafted slots: $208 of discretionary money
+    against the uneven pool's $145, so every position opens at 208/145 =
+    1.4345 — clear of ``INFLATION_MIN`` below and ``INFLATION_MAX``
+    above. A position can be observed NOT moving here; at par it would
+    sit on the clamp and every wrong answer would read 1.0 too."""
+    return make_board({1: 110, 2: 110}, sales, drafted_slots=6)
+
+
 def _par_board(sales=(), off_model=()):
     """Two teams, six drafted slots, $93 budgets: initial discretionary
     money 2 x (93 - 6) = $174 exactly matches the $174 sheet pool, so
@@ -71,21 +98,35 @@ class TestPositionalInflation:
         assert inflation["WR"] == pytest.approx(1.0)
 
     def test_bargain_inflates_that_position_and_only_that_position(self):
-        """Anti-cheat (two mutants): rb1 (worth \\$40) sells for \\$20.
+        """Anti-cheat (three mutants): rb1 (worth \\$40) sells for \\$20.
         The RB ratio must move — only $19 of discretionary money left the
         room while $39 of RB value left the board, so the survivors have
-        more money chasing them — and the WR ratio must not move at all.
-        A pooled implementation moves both; a static one moves neither.
+        more money chasing them — and the WR ratio must not move at all,
+        from 208/145 = 1.4345 to 208/145.
 
         The isolation check lives on the INFLATION side because the
         deflation side no longer varies: ``INFLATION_MIN`` is 1.0, so
         every below-par ratio reads 1.0 and a below-par fixture can no
-        longer tell a per-position implementation from a pooled one."""
-        board = _par_board([Sale("rb1", 20, 2)])
-        inflation = positional_inflation(_inflation_rows(), board)
-        assert inflation["RB"] == pytest.approx((87 - 19) / 48)
-        assert inflation["RB"] > 1.0
-        assert inflation["WR"] == pytest.approx(1.0)
+        longer tell a per-position implementation from a pooled one.
+
+        The fixture is a RICH room over UNEVEN pools for the same
+        reason, one the first version of this test missed: on the par
+        board the untouched position sits at exactly 1.0, which is what
+        the floor emits for every wrong answer too, so the WR assertion
+        was satisfied by the clamp rather than by the engine. Here every
+        reading is off both clamps and three mutants are observable —
+        debiting pooled spend (``sum(spent.values())``) drops WR to
+        105/87 = 1.2069 instead of 1.4345, splitting the budget evenly
+        (``money / len(initial)``) reads RB 1.7708 / WR 1.7931, and an
+        implementation that ignores sales leaves RB at the opening
+        1.4345."""
+        rows = _uneven_inflation_rows()
+        opening = positional_inflation(rows, _rich_uneven_board())
+        inflation = positional_inflation(rows, _rich_uneven_board([Sale("rb1", 20, 2)]))
+        assert inflation["RB"] == pytest.approx((208 * 87 / 145 - 19) / 48)
+        assert inflation["RB"] > opening["RB"]
+        assert inflation["WR"] == opening["WR"] == pytest.approx(208 / 145)
+        assert INFLATION_MIN < inflation["WR"] < INFLATION_MAX
 
     def test_overpay_deflation_is_held_at_the_floor(self):
         """The floor's whole job, and the modelling cost it buys.
