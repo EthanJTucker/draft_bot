@@ -271,8 +271,27 @@ class TestReport:
     def test_report_carries_every_required_number(self, replay):
         """The acceptance surface: overall and per-position MAE, the
         early/mid/late drift comparison, the documented bounds, and the
-        off-model exclusions all appear in the rendered text."""
+        off-model exclusions all appear in the rendered text.
+
+        Each gate bound is checked as a whole ROW — label, measured
+        value, bound and margin — because none of those cells is unique
+        on its own. The bare bound values alias: ``RUNNING_MAE_BOUND``
+        and ``STATIC_MAE_BOUND`` are both 2.75 and the two spread bounds
+        are both 2.50 while the floor binds on every lot, so a substring
+        check on ``"2.75"`` stays green even with the whole running-MAE
+        row deleted from the gate table. The bare label aliases too:
+        ``| running MAE |`` is also a per-position and segment table
+        header cell. Only the full row pins the gate row itself.
+        """
         text = render_report(replay["records"], replay["rows"])
+        records = replay["records"]
+        run = overall_stats(records, "running")
+        static = overall_stats(records, "static")
+        running_segments = segment_stats(records, "running")
+
+        def gate_row(label: str, measured: float, bound: float, margin: float) -> str:
+            return f"| {label} | {measured:.2f} | {bound:.2f} | {margin:.2f} |"
+
         for required in (
             "## Headline",
             "## Per-position",
@@ -287,11 +306,32 @@ class TestReport:
             "early",
             "mid",
             "late",
-            f"{RUNNING_MAE_BOUND:.2f}",
-            f"{RUNNING_DRIFT_SPREAD_BOUND:.2f}",
-            f"{RUNNING_SEGMENT_BIAS_BOUND:.2f}",
-            f"{STATIC_MAE_BOUND:.2f}",
-            f"{STATIC_DRIFT_SPREAD_BOUND:.2f}",
+            gate_row("running MAE", run.mae, RUNNING_MAE_BOUND, RUNNING_MAE_MARGIN),
+            gate_row(
+                "running bias spread (early/mid/late)",
+                drift_spread(running_segments),
+                RUNNING_DRIFT_SPREAD_BOUND,
+                RUNNING_DRIFT_SPREAD_MARGIN,
+            ),
+            gate_row(
+                "running worst segment absolute bias",
+                max(abs(segment.stats.bias) for segment in running_segments),
+                RUNNING_SEGMENT_BIAS_BOUND,
+                RUNNING_SEGMENT_BIAS_MARGIN,
+            ),
+            gate_row("static MAE", static.mae, STATIC_MAE_BOUND, STATIC_MAE_MARGIN),
+            gate_row(
+                "static bias spread (early/mid/late)",
+                drift_spread(segment_stats(records, "static")),
+                STATIC_DRIFT_SPREAD_BOUND,
+                STATIC_DRIFT_SPREAD_MARGIN,
+            ),
+            gate_row(
+                "static absolute bias",
+                abs(static.bias),
+                STATIC_BIAS_BOUND,
+                STATIC_BIAS_MARGIN,
+            ),
         ):
             assert required in text, f"report is missing {required!r}"
 
