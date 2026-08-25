@@ -136,15 +136,20 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # and of `t.budget_is_default`. The rendering itself (amber on the
     # my-team money, the caps line, the max-bid figure and its sub;
     # plain when the budgets are real) was checked in a browser.
-    assert "BUDGET NOT ENTERED" in page
     assert "!!me.budget_is_default" in page
     assert "!!(s.me && s.me.budget_is_default)" in page
     assert "!!(s.defaulted_keeper_slots && s.defaulted_keeper_slots.length)" in page
-    assert ".sub.guessed" in page
-    assert "#my-team .money.guessed" in page
-    # The id is load-bearing: a bare `.value.guessed` loses the cascade
-    # to `#max-bid` and the 30px figure stays confident blue.
-    assert "#max-bid.guessed" in page
+    # The amber DECLARATIONS, not merely the selectors. Repointing any of
+    # these three at var(--green) / var(--dim) / var(--accent) leaves the
+    # selector spelled exactly as before and neuters the mark, which is
+    # how the whole family survived the looser version of this check.
+    my_team_marks = "#my-team .money.guessed, #my-team .caps.guessed"
+    assert my_team_marks + " { color: var(--amber); }" in page
+    assert ".stat .sub.guessed { color: var(--amber); }" in page
+    # The id in that last one is load-bearing twice over: a bare
+    # `.value.guessed` loses the cascade to `#max-bid`, and a
+    # var(--accent) fill leaves the 30px figure in confident blue.
+    assert "#max-bid.guessed { color: var(--amber); }" in page
     # The two class assignments that put the amber ON that figure and its
     # sub-line. Asserted as whole expressions, not by element id: dropping
     # the conditional back to a bare 'value num' survives every looser
@@ -155,6 +160,29 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
         "'sub' + (analysis && (guessedBudget || guessedRoom) ? ' guessed' : '')" in page
     )
     assert "room default" in page  # the sub-line's room qualifier
+    # Each flag is assigned exactly once. A declaration assert cannot see
+    # a re-assignment appended after it (`var guessed = ...; guessed =
+    # false;`), which mutes every mark below while leaving all three
+    # declarations above intact.
+    for flag in ("guessed", "guessedBudget", "guessedRoom"):
+        assert page.count(flag + " = ") == 1
+    # BUDGET NOT ENTERED appears TWICE in this file, on the max-bid sub
+    # and on the my-team caps line, so the bare substring is satisfied by
+    # either one and dropping the other is invisible. Both are pinned
+    # here in the form they actually render, separator included.
+    assert "'BUDGET NOT ENTERED · '" in page
+    assert " · BUDGET NOT ENTERED: shown at the league default" in page
+    # The my-team caps line leads with the DRAFT slot, which is the
+    # number --budget is keyed by; 'roster ' + me.slot renders a
+    # plausible wrong label for the identifier this whole rule turns on.
+    assert "'draft slot ' + me.slot" in page
+    # The teams table's first column, which the legend below points at.
+    assert '\'"><td class="num">\' + t.slot' in page
+    # The legend that tells the operator what the amber and the asterisk
+    # mean, and which identifier to re-key by. Its two load-bearing
+    # claims, so reverting it to the pre-fix wording fails here.
+    assert "computed from all twelve budgets, not just mine" in page
+    assert "SLOT is the DRAFT slot in the first column, not a roster id" in page
 
 
 def test_run_poll_loop_steps_the_poller_until_stopped(config):
