@@ -540,10 +540,13 @@ def test_an_explicit_my_slot_is_checked_even_before_the_order_lands(tmp_path):
     about the status.
 
     `--my-slot 4` is the operator stating his slot himself, so resolving
-    it never touches the slot map and a pre_draft draft cannot make it
+    it never touches the slot map and an undealt order cannot make it
     stale. The check must still run here and still catch `--budget 7=96`.
-    A fix that keys the caveat on `status == "pre_draft"` alone goes quiet
-    on this board and fails."""
+    A caveat read off the draft object alone — dropping the "and my slot
+    did not come from that map" half — goes quiet on this board and fails
+    here. The other half of the pair is pinned next door: the shouts test
+    runs a pre_draft draft whose order HAS been dealt, so a caveat keyed
+    on the status alone swallows the loud warning and fails there."""
     out = io.StringIO()
 
     code = main(
