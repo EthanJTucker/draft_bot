@@ -266,6 +266,16 @@ class DashboardPoller:
             # nobody entered, these show money somebody DID enter and
             # cannot be true, and the page says which on the caps line.
             "impossible_keeper_slots": list(board.impossible_keeper_slots),
+            # The third mark the page paints, and the only board-wide one:
+            # on a bridge the draft order has moved past, the keeper lists
+            # behind every roster, need count and open-slot count are on
+            # the wrong seats, and the max bid is computed from all of
+            # them. Withholding the verdict is not enough on its own — the
+            # figures stay on screen, and an unmarked 30px number reads as
+            # a fact. The banner that says so is free text in
+            # settings_warnings, which nothing on the page parses, so the
+            # same one boolean the verdict fails closed on comes here too.
+            "keeper_map_stale": board.keeper_map_stale,
             "me": self._me_json(board, my_slot),
             "players": self._players_json(board),
             "sales": [self._sale_json(sale) for sale in board.sales],

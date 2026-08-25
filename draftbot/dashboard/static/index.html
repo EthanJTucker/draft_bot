@@ -151,7 +151,7 @@
         <h2>Team budgets (remaining)</h2>
         <table><thead><tr><th>Slot</th><th></th><th>Needs</th><th>$ left</th><th>Open</th><th>Max</th></tr></thead>
         <tbody id="teams"></tbody></table>
-        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. ! budget entered, but above what that team's keepers can possibly leave: not a guess, a figure that cannot be true, named with its source in the banner. Amber above means a figure built on one of these: my own money when MY slot carries either mark, and my max bid whenever any keeper team's does &mdash; that number is computed from all twelve budgets, not just mine. Restart with --budget SLOT=AMOUNT to key the real ones, where SLOT is the DRAFT slot in the first column, not a roster id.</div>
+        <div class="legend">* budget not entered on Sleeper yet; shown at the league default. ! budget entered, but above what that team's keepers can possibly leave: not a guess, a figure that cannot be true, named with its source in the banner. Amber above means a figure built on one of these: my own money when MY slot carries either mark, and my max bid whenever any keeper team's does &mdash; that number is computed from all twelve budgets, not just mine. Amber carries its own OLD DRAFT ORDER qualifier instead when the draft order changed after this dashboard started: the money is real, the seating behind it is not, and only a restart clears it. Restart with --budget SLOT=AMOUNT to key the real ones, where SLOT is the DRAFT slot in the first column, not a roster id.</div>
       </div>
       <div class="panel" style="margin-top:12px">
         <h2>Recent sales</h2>
@@ -248,26 +248,37 @@ function renderNomination(s) {
   // so a fabricated budget on a keeper team I do not own still moves
   // this number. Either one marks the tile — the amber sub-line alone
   // pointed at the cap, which is usually not the binding constraint.
-  // Two different faults, both of which move this figure. A room budget
+  // Three different faults, all of which move this figure. A room budget
   // nobody entered is a guess; one somebody entered that a keeper roster
   // provably cannot have left is a proven-wrong number wearing a real
-  // provenance, so nothing else on the page marks it.
+  // provenance, so nothing else on the page marks it. The third is the
+  // whole board: when the draft order is dealt after this dashboard
+  // started, the keeper lists it prices the room from are still on their
+  // old seats, and every budget above is summed over all twelve of them.
+  // Its own qualifier, not the budget one, because the money here was
+  // entered and is not a guess; what moved is the seating behind it. And
+  // NOT a blanked em-dash: '—' is what this page renders when there is
+  // nothing to show, so a dash here would read as "not priced yet" and
+  // the operator would wait rather than restart. The figure keeps its
+  // magnitude and loses the confident blue.
   var guessedBudget = !!(s.me && s.me.budget_is_default);
   var roomDefault = (s.defaulted_keeper_slots || []).length;
   var roomImpossible = (s.impossible_keeper_slots || []).length;
   var guessedRoom = !!(roomDefault || roomImpossible);
+  var oldOrder = !!s.keeper_map_stale;
   var maxEl = document.getElementById('max-bid');
   maxEl.textContent = analysis ? dollars(analysis.max_bid) : '—';
-  maxEl.className = 'value num' + (guessedBudget || guessedRoom ? ' guessed' : '');
+  maxEl.className = 'value num' + (guessedBudget || guessedRoom || oldOrder ? ' guessed' : '');
   var capEl = document.getElementById('max-bid-sub');
   capEl.textContent = analysis
-    ? (guessedBudget ? 'BUDGET NOT ENTERED · ' : '') +
+    ? (oldOrder ? 'OLD DRAFT ORDER — RESTART · ' : '') +
+      (guessedBudget ? 'BUDGET NOT ENTERED · ' : '') +
       'cap ' + dollars(analysis.my_cap) +
       ' · infl ×' + analysis.inflation.toFixed(2) +
       (roomDefault ? ' (room default ×' + roomDefault + ')' : '') +
       (roomImpossible ? ' (room IMPOSSIBLE ×' + roomImpossible + ')' : '')
     : '';
-  capEl.className = 'sub' + (analysis && (guessedBudget || guessedRoom) ? ' guessed' : '');
+  capEl.className = 'sub' + (analysis && (guessedBudget || guessedRoom || oldOrder) ? ' guessed' : '');
 
   var verdictEl = document.getElementById('verdict');
   if (nom.verdict) {
@@ -360,10 +371,19 @@ function renderMe(s) {
   // in confident 34px green on the same screen as the banner calling it
   // impossible. Marking the figure is not the same as blanking the
   // verdict, and only the figure is marked here.
+  // The third fault reaches this panel too, and here it is the one the
+  // operator is most likely to act on: my own slot re-resolves from the
+  // live map every poll while my keepers stay on the seat the old order
+  // gave them, so remaining, open slots, needs and the roster list below
+  // can all describe a seat that is no longer mine. Marked, not blanked,
+  // for the same reason as the max bid: a permutation that happens to
+  // fix my slot leaves this panel exactly right, and blanking a correct
+  // panel teaches the operator to ignore the mark.
   var guessed = !!me.budget_is_default;
   var myBudgetImpossible = (s.impossible_keeper_slots || []).indexOf(me.slot) >= 0;
+  var myOldOrder = !!s.keeper_map_stale;
   moneyEl.textContent = dollars(me.remaining);
-  moneyEl.className = 'money num' + (guessed || myBudgetImpossible ? ' guessed' : '');
+  moneyEl.className = 'money num' + (guessed || myBudgetImpossible || myOldOrder ? ' guessed' : '');
   // The draft slot leads the line on purpose: it is the number --budget
   // is keyed by, and it is NOT the roster id — this league permutes the
   // two when it assigns the draft order.
@@ -371,9 +391,12 @@ function renderMe(s) {
     ' · ' + me.open_slots +
     ' open · needs ' + (needsText(me.needs) || '—') +
     (guessed ? ' · BUDGET NOT ENTERED: shown at the league default' : '') +
-    (myBudgetImpossible ? ' · BUDGET IMPOSSIBLE: above what my keepers can leave' : '');
-  capsEl.className = 'caps' + (guessed || myBudgetImpossible ? ' guessed' : '');
-  document.getElementById('my-roster').innerHTML = (me.roster || []).map(function (p) {
+    (myBudgetImpossible ? ' · BUDGET IMPOSSIBLE: above what my keepers can leave' : '') +
+    (myOldOrder ? ' · OLD DRAFT ORDER — RESTART: keyed to the seating this dashboard started with' : '');
+  capsEl.className = 'caps' + (guessed || myBudgetImpossible || myOldOrder ? ' guessed' : '');
+  document.getElementById('my-roster').innerHTML =
+    (myOldOrder ? '<li class="needs">OLD DRAFT ORDER — RESTART: this list is keyed to the seating this dashboard started with, and an empty one means my keepers are counted against my old seat</li>' : '') +
+    (me.roster || []).map(function (p) {
     return '<li><span class="pos">' + esc(p.position || '?') + '</span><span>' + esc(p.name) +
       (p.keeper ? ' (K)' : '') + '</span><span class="price num">' + (p.price == null ? '' : dollars(p.price)) + '</span></li>';
   }).join('');

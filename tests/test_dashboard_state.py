@@ -374,6 +374,10 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
     assert [entry["player_id"] for entry in fresh["me"]["roster"]] == list(_MY_KEEPERS)
     assert not _stale_banners(fresh)
     assert fresh["nomination"]["verdict"] is not None
+    # The flag the page's amber reads, in the QUIET direction too: an
+    # export hard-wired to True marks a correctly bridged board's 30px
+    # figure as untrustworthy, which trains the operator to ignore it.
+    assert fresh["keeper_map_stale"] is False
 
     dealt = poller.step()
     assert dealt["me"]["slot"] == MY_DRAFT_SLOT  # roster 7 now drafts from slot 4
@@ -384,6 +388,13 @@ def test_a_draft_order_dealt_after_startup_blanks_the_tool_and_says_restart(conf
     # So the tool stops, loudly, in the one way the operator can act on.
     (stale,) = _stale_banners(dealt)
     assert "RESTART" in stale["actual"]
+    # And the 30px MAX BID tile stops reading as a fact. The page cannot
+    # see the banner, so the flag has to reach it through /state: without
+    # this key `guessedRoom` is false on this exact board (both slot sets
+    # below are empty) and the figure paints in confident accent blue.
+    assert dealt["keeper_map_stale"] is True
+    assert dealt["defaulted_keeper_slots"] == []
+    assert dealt["impossible_keeper_slots"] == []
     assert dealt["nomination"]["analysis"] is not None  # priced; the CALL is withheld
     assert dealt["nomination"]["verdict"] is None
     assert "RESTART" in dealt["nomination"]["verdict_reason"]
@@ -676,6 +687,13 @@ def test_snapshot_json_contract_is_pinned_for_a_rich_fixture(config):
         # provenance calls real. Merging them would make one of the page's
         # two captions a lie.
         "impossible_keeper_slots",
+        # The third page-mark key, and the only one of the three that is a
+        # BOARD-wide fact rather than a set of slots. The page has no other
+        # way to know the figures it is about to paint were computed on a
+        # bridge the draft order has moved past: the banner that says so
+        # arrives as free text in settings_warnings, which nothing on the
+        # page parses.
+        "keeper_map_stale",
         "me",
         "players",
         "sales",

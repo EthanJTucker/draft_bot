@@ -180,12 +180,21 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     assert "var roomDefault = (s.defaulted_keeper_slots || []).length;" in page
     assert "var roomImpossible = (s.impossible_keeper_slots || []).length;" in page
     assert "!!(roomDefault || roomImpossible)" in page
-    # My own impossible money, and the two marks it drives.
+    # My own impossible money.
     assert "(s.impossible_keeper_slots || []).indexOf(me.slot) >= 0" in page
-    assert "'money num' + (guessed || myBudgetImpossible ? ' guessed' : '')" in page
-    assert "'caps' + (guessed || myBudgetImpossible ? ' guessed' : '')" in page
     assert " · BUDGET IMPOSSIBLE: above what my keepers can leave" in page
     assert "(room IMPOSSIBLE ×" in page
+    # The THIRD fault behind the same amber, and the only board-wide one:
+    # a keeper bridge the draft order has moved past. Pinned at its SOURCE
+    # on both readers, because it arrives as a plain boolean no other mark
+    # reads — re-sourcing either from `s.paused` marks a board that clears
+    # itself and leaves this one confident, at exit 0. Its own qualifier,
+    # in all three places it renders: reusing BUDGET NOT ENTERED here
+    # would be false, since that money WAS entered and only the seating
+    # behind it moved.
+    assert "var oldOrder = !!s.keeper_map_stale;" in page
+    assert "var myOldOrder = !!s.keeper_map_stale;" in page
+    assert page.count("OLD DRAFT ORDER — RESTART") == 3
     # The teams table's second mark, its SOURCE, and the legend clause
     # that reads it. The `!` is the only mark in this family that routes
     # through an alias, and pinning the consumer alone leaves the binding
@@ -206,15 +215,20 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
     # `.value.guessed` loses the cascade to `#max-bid`, and a
     # var(--accent) fill leaves the 30px figure in confident blue.
     assert "#max-bid.guessed { color: var(--amber); }" in page
-    # The two class assignments that put the amber ON that figure and its
-    # sub-line. Asserted as whole expressions, not by element id: dropping
-    # the conditional back to a bare 'value num' survives every looser
-    # form of this check. Brittle to reformatting on purpose — an edit
+    # The four class assignments that put the amber ON the max bid, its
+    # sub-line, my money and my caps line. Asserted as whole expressions,
+    # not by element id: dropping any conditional back to a bare 'value
+    # num' survives every looser form of this check, and so does dropping
+    # one disjunct out of it. Brittle to reformatting on purpose — an edit
     # here has to be re-checked in a browser, because nothing runs it.
-    assert "'value num' + (guessedBudget || guessedRoom ? ' guessed' : '')" in page
-    assert (
-        "'sub' + (analysis && (guessedBudget || guessedRoom) ? ' guessed' : '')" in page
-    )
+    for class_expression in (
+        "'value num' + (guessedBudget || guessedRoom || oldOrder ? ' guessed' : '')",
+        "'sub' + (analysis && (guessedBudget || guessedRoom || oldOrder)"
+        " ? ' guessed' : '')",
+        "'money num' + (guessed || myBudgetImpossible || myOldOrder ? ' guessed' : '')",
+        "'caps' + (guessed || myBudgetImpossible || myOldOrder ? ' guessed' : '')",
+    ):
+        assert class_expression in page
     assert "room default" in page  # the sub-line's room qualifier
     # Each flag is assigned exactly once. A declaration assert cannot see
     # a re-assignment appended after it (`var guessed = ...; guessed =
@@ -226,7 +240,9 @@ def test_index_page_carries_a_slot_for_every_required_element(config):
         "guessedRoom",
         "roomDefault",
         "roomImpossible",
+        "oldOrder",
         "myBudgetImpossible",
+        "myOldOrder",
         "impossibleSlots",
     ):
         assert page.count(flag + " = ") == 1
