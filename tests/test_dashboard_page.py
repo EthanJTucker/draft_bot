@@ -15,12 +15,34 @@ so it is strong on the exact strings it names and blind to everything
 else about the page. Specifically invisible to it:
 
 * CSS APPENDED BELOW what is pinned. A later ``:root`` re-declaring a
-  token, a rule hiding a container or an item, a higher-specificity rule
-  (``#topbar #max-bid`` beats ``#max-bid.guessed`` 2-0-0), or an
-  ``!important`` anywhere all leave every asserted declaration
-  byte-identical and repaint the page. The counted asserts below close
-  the ``:root``, ``#banners`` and ``.banner`` cases; only specificity and
-  ``!important`` remain, and both survive a full green run today.
+  token, an equal-specificity duplicate of a pinned rule, a rule hiding
+  a container or an item, a higher-specificity rule (``#topbar
+  #max-bid`` beats ``#max-bid.guessed`` 2-0-0), or an ``!important``
+  anywhere all leave every asserted declaration byte-identical and
+  repaint the page.
+
+  Counting is what closes any of these, and it closes exactly one
+  shape: a SECOND rule spelled with a selector that is counted. The
+  asserts below hold ``--amber``, ``#banners {``, ``.banner {``,
+  ``.banner.amber`` and the three ``.guessed`` mark rules at one
+  occurrence each. Appending duplicates of those three ``.guessed``
+  selectors in ``var(--accent)`` repainted every amber mark on the page
+  in confident blue at exit 0 — same selectors, no ``!important``, no
+  added specificity, one cascade level below the token — and that is
+  what the three ``.guessed`` counts now stop.
+
+  WHAT COUNTING CANNOT REACH, all of it measured green today: a rule
+  whose selector is not one of the counted ones. ``#topbar #max-bid
+  { color: var(--accent); }`` wins on specificity; the same declaration
+  with ``!important`` wins outright; and ``#max-bid``, ``#my-team`` or
+  ``.needs`` set to ``display: none`` takes the marked figure, my whole
+  panel or the roster's RESTART note off the screen entirely. Closing
+  those by string would mean counting every selector this file spells
+  and forbidding every one it does not, against an unbounded set of
+  selectors reaching the same elements and an unbounded set of
+  spellings for "hidden" (``visibility``, a zero size, a transparent
+  colour). This suite cannot carry that check, so it does not claim to.
+  Reading the computed styles in a browser is what catches them.
 * A RETARGETED assignment. Sending an asserted class expression to a
   different element leaves the expression spelled exactly as pinned, and
   also survives a full green run today.
@@ -281,3 +303,16 @@ def test_index_page_delivers_the_marks_and_banners_it_spells(config):
     assert "document.getElementById('my-roster').innerHTML =" in page
     assert "put('verdict-sub', nom.verdict_reason || '')" in page
     assert page.count(".banner {") == 1
+    # 9. The three amber MARK rules, counted. The `--amber:` count above
+    #    closes the token; this closes the same attack one cascade level
+    #    lower, where it does not need the token at all. Appending
+    #    equal-specificity duplicates of these three selectors in
+    #    `var(--accent)` — same selectors, later in the file, no
+    #    `!important` and no added specificity — repainted every amber
+    #    mark on the page, including all four this branch added, in
+    #    confident blue, at exit 0 with the declarations next door still
+    #    byte-identical. These are the marks that say a 30px figure is a
+    #    guess, so blue is the one colour they must never be.
+    assert page.count("#max-bid.guessed") == 1
+    assert page.count(".money.guessed") == 1
+    assert page.count(".sub.guessed") == 1
