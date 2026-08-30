@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from draftbot.config import DEFAULT_STARTER_PCT, LeagueConfig
+from draftbot.config import DEFAULT_STARTER_PCT
 from draftbot.models import parse_picks
 from draftbot.valuation import (
     Bid,
@@ -29,6 +29,7 @@ from draftbot.valuation import (
     skill_slot_target,
     value_map,
 )
+from tests.helpers_valuation import league_config as _league_config
 from tests.helpers_valuation import projection_row
 
 
@@ -555,6 +556,27 @@ class TestBlendedWorth:
         with pytest.raises(ValueError, match="QB"):
             self._worths(bench_ranks=shallow, starter_pct=0.5)
 
+    def test_a_bench_map_missing_a_valued_position_is_refused_by_name(self):
+        """The third shape of the same argument error, and the one that
+        used to escape as a bare ``KeyError: 'TE'`` out of ``_vorp`` — an
+        exception naming neither the argument at fault nor what was wrong
+        with it. Every valued position needs a rank, and the error has to
+        say which one is absent."""
+        for position in sorted(self.BENCH):
+            partial = {k: v for k, v in self.BENCH.items() if k != position}
+            with pytest.raises(ValueError, match=position):
+                self._worths(bench_ranks=partial, starter_pct=0.5)
+
+    def test_an_extra_position_in_the_bench_map_is_harmless(self):
+        """Anti-cheat for the guard above: it must require every STARTER
+        position to be present, not require the two sets to match.
+        ``bench_replacement_ranks`` is free to return more than it is
+        asked for, so a bench map carrying K has to price exactly as one
+        without it — a symmetric-difference check reddens here."""
+        assert self._worths(bench_ranks={**self.BENCH, "K": 40}) == self._worths(
+            bench_ranks=self.BENCH
+        )
+
     def test_a_bench_rank_past_the_pool_falls_back_to_the_worst_player(self):
         """A rank deeper than the position's own pool must not collapse
         replacement to ZERO points.
@@ -813,29 +835,6 @@ class TestBenchReplacementRanks:
         with pytest.warns(UserWarning):
             ranks = bench_replacement_ranks({}, self.STARTERS, skill_slots=100)
         assert ranks == self.STARTERS
-
-
-def _league_config(**overrides):
-    """A minimal LeagueConfig for model-fit tests (tiny two-team league);
-    valuation knobs default to the decided values unless overridden."""
-    base = {
-        "league_name": "T",
-        "season": 2026,
-        "league_id": "L",
-        "draft_id": "D",
-        "teams": 2,
-        "auction_budget": 12,
-        "roster_slots": {"QB": 1, "BN": 1},
-        "keeper_cost_increment": 2,
-        "keeper_cost_floor": 5,
-        "max_keepers": 3,
-        "max_consecutive_keep_years": 2,
-        "my_username": "u",
-        "my_user_id": "i",
-        "my_roster_id": 1,
-    }
-    base.update(overrides)
-    return LeagueConfig(**base)
 
 
 class TestValuationConfigFlow:

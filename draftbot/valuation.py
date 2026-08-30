@@ -501,13 +501,23 @@ def _split_pool(
 def _check_bench_is_deeper(
     starter: Mapping[str, int], bench: Mapping[str, int]
 ) -> None:
-    """Refuse a "deeper" baseline that is shallower than the starter one.
+    """Refuse a bench baseline missing a position, or shallower than the
+    starter one.
 
     The clamp lives in :func:`bench_replacement_ranks`, but
     :func:`compute_worths` is module-public and the clamp is not its
     property. A shallower bench rank produces a plausible, conserving,
-    WRONG sheet, so no invariant test would catch it.
+    WRONG sheet, so no invariant test would catch it. A MISSING position
+    used to surface as a bare ``KeyError: 'TE'`` out of ``_vorp``, naming
+    neither the argument at fault nor what was wrong with it. Extra
+    positions in ``bench`` are harmless and stay allowed.
     """
+    missing = sorted(set(starter) - set(bench))
+    if missing:
+        raise ValueError(
+            f"bench_ranks has no rank for {', '.join(missing)}; every valued "
+            f"position needs one ({', '.join(sorted(starter))})"
+        )
     for position, rank in sorted(bench.items()):
         if position in starter and rank < starter[position]:
             raise ValueError(
@@ -897,12 +907,16 @@ def build_value_sheet(
 ) -> list[SheetRow]:
     """The full ranked, priced player pool for the config's season.
 
-    Every player with an ADP or positive projection at a rosterable
-    position gets worth (VBD dollars), room price (band median with curve
-    fallback), and an NPV-adjusted value: worth plus the keeper premium
-    evaluated at the room price. Ranked by value, ties broken by player
-    id after quantizing — two runs over the same inputs emit identical
-    rows.
+    Every player with an ADP, a positive projection, or worth above the
+    $1 floor, at a rosterable position, gets worth (VBD dollars), room
+    price (band median with curve fallback), and an NPV-adjusted value:
+    worth plus the keeper premium evaluated at the room price. Ranked by
+    value, ties broken by player id after quantizing — two runs over the
+    same inputs emit identical rows.
+
+    That third clause is the engine's precondition, not a draftability
+    judgement: the emitted sheet's above-floor total has to stay equal to
+    the room's discretionary money, or opening inflation is not par.
 
     ``slot_to_roster_by_year`` (each year's draft ``slot_to_roster_id``)
     lets the fit drop unflagged keeper rows hiding in the feeds; without
@@ -927,7 +941,19 @@ def build_value_sheet(
     unranked = []
     for player_id in sorted(season):
         row = season[player_id]
-        draftable = _valid_adp(row.adp) or (row.points or 0) > 0
+        # A priced row always ships. ADP-or-positive-projection is the
+        # draftability question, but worth above the floor is a normalization
+        # fact: `compute_worths` spread the room's money over this player, so
+        # dropping his row would leave the emitted sheet holding less
+        # above-floor value than the room holds money — which is exactly the
+        # quantity `positional_inflation` divides by, and par at open would
+        # break. Reachable when a projection is negative but still above a
+        # negative bench replacement, with no usable ADP.
+        draftable = (
+            worths[player_id] > FLOOR_PRICE
+            or _valid_adp(row.adp)
+            or (row.points or 0) > 0
+        )
         if row.position not in SHEET_POSITIONS or not draftable:
             continue
         room = _quantize(prices.room_price(row.position, row.adp))
