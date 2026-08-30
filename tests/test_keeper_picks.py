@@ -17,10 +17,12 @@ either confusion before this module.
 
 from __future__ import annotations
 
-from draftbot.tracker import DraftTracker, keepers_by_slot_from_rosters
+from draftbot.draft_engine import positional_inflation
+from draftbot.tracker import DraftTracker, Sale, keepers_by_slot_from_rosters
 
 from .conftest import raw_auction_pick, raw_keeper_pick
 from .helpers_dashboard import make_tick
+from .helpers_engine import make_board, sheet_row
 
 # The draft order as this league actually deals it: a full permutation,
 # fixing nothing. My roster id is 7 (league_config.toml) and it drafts
@@ -299,3 +301,73 @@ def test_the_board_carries_the_keeper_flag_on_every_sale(config):
     assert by_id["K1"].is_keeper is True
     assert by_id["K1"].draft_slot == MY_SLOT
     assert by_id["B"].is_keeper is False
+
+
+# --- the inflation model -------------------------------------------------
+
+
+def _inflation_rows():
+    """A two-position sheet with the keeper priced well above the tail, so
+    excluding him moves the ratio by more than rounding. Four roster slots
+    and these budgets keep every ratio below the model's ceiling, where a
+    clamped board would compare equal whatever the rule did."""
+    return [
+        sheet_row(1, "K1", "RB", 65.0),
+        sheet_row(2, "R2", "RB", 40.0),
+        sheet_row(3, "R3", "RB", 20.0),
+        sheet_row(4, "W1", "WR", 30.0),
+        sheet_row(5, "W2", "WR", 10.0),
+    ]
+
+
+def test_a_priced_keeper_prices_the_room_exactly_as_a_kept_player_does():
+    """The whole point of AC 3, stated as an equality.
+
+    Left board: the keeper is a roster keeper, his $48 already netted out
+    of a $60 budget_<slot>. Right board: the identical team, the same
+    keeper reaching the model as a $48 keeper PICK against the full $108.
+    The two describe ONE room, so they must price it identically — same
+    discretionary money, same pool, no position debited by a chain price.
+    """
+    rows = _inflation_rows()
+    kept = make_board({1: 60, 2: 60}, keeper_counts={1: 1}, drafted_slots=4)
+    priced = make_board(
+        {1: 108, 2: 60}, [Sale("K1", 48, 1, is_keeper=True)], drafted_slots=4
+    )
+
+    assert positional_inflation(rows, kept, {1: ("K1",)}) == positional_inflation(
+        rows, priced
+    )
+
+
+def test_the_same_dollars_as_an_auction_sale_move_the_ratio():
+    """Anti-cheat on the equality above: it must come from the keeper rule,
+    not from a model too blunt to notice a $48 sale at all, or from a
+    clamp both boards hit. Flip the one flag and the RB ratio moves."""
+    rows = _inflation_rows()
+    priced = make_board(
+        {1: 108, 2: 60}, [Sale("K1", 48, 1, is_keeper=True)], drafted_slots=4
+    )
+    bought = make_board({1: 108, 2: 60}, [Sale("K1", 48, 1)], drafted_slots=4)
+
+    assert (
+        positional_inflation(rows, priced)["RB"]
+        != positional_inflation(rows, bought)["RB"]
+    )
+
+
+def test_keeper_dollars_never_count_as_money_chasing_the_pool():
+    """The other half of the ratio. Keeper spend has already left the room,
+    so a board carrying it must not price like the same room that still
+    holds the money — which is what happens when the per-position spend is
+    filtered and the money term is not."""
+    rows = _inflation_rows()
+    priced = make_board(
+        {1: 108, 2: 60}, [Sale("K1", 48, 1, is_keeper=True)], drafted_slots=4
+    )
+    unspent = make_board({1: 108, 2: 60}, keeper_counts={1: 1}, drafted_slots=4)
+
+    assert (
+        positional_inflation(rows, priced)["WR"]
+        < positional_inflation(rows, unspent, {1: ("K1",)})["WR"]
+    )
