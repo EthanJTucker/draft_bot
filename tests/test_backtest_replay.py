@@ -51,7 +51,7 @@ from draftbot.sources import ReplaySource
 from draftbot.tracker import DraftTracker, default_expected_settings
 from draftbot.valuation import value_map
 
-from .conftest import REPO_ROOT
+from .conftest import REPO_ROOT, config_with_a_wrong_typed_tunable
 
 DRAFT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
 HISTORY_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "league_history.json"
@@ -231,11 +231,11 @@ class TestGateBounds:
         recovers it exactly. Three claims the report and the docstring
         make rest on this census and nothing else pinned it:
 
-        - **max 0.5987 < 1.0** — no lot's raw ratio ever reaches par, so
+        - **max 0.5942 < 1.0** — no lot's raw ratio ever reaches par, so
           "zero of the 159 lots at ``INFLATION_MIN``" is unsatisfiable
           at any floor above the observed maximum, whatever the floor is
           set to. This is the whole argument for the raised floor.
-        - **min -0.2101, on 36 of 159 lots, all WR** — below par is not
+        - **min -0.2141, on 36 of 159 lots, all WR** — below par is not
           the worst of it. On those lots the per-position budget SPLIT
           has overspent its share, so the numerator goes negative; a
           denominator re-size cannot repair a negative numerator, which
@@ -247,6 +247,15 @@ class TestGateBounds:
 
         Re-measure and re-state the report when #17 changes the
         denominator; do not just re-pin the literals.
+
+        Re-measured once on that rule already, when the inflation pool
+        stopped being taper-weighted so that a production sheet opens at
+        par. The denominator widened from $2445.38 to $2463.83 here, which
+        pushed both ends of the census slightly further from par (0.59868
+        to 0.59420, -0.21007 to -0.21406). All three claims above survive
+        unchanged in kind, and every statistic the report publishes is
+        bit-identical, because every scored lot was clamped before and
+        still is.
         """
         monkeypatch.setattr(draft_engine, "INFLATION_MIN", -1e9)
         monkeypatch.setattr(draft_engine, "INFLATION_MAX", 1e9)
@@ -259,9 +268,9 @@ class TestGateBounds:
         scored = scored_records(records)
         assert len(scored) == 159
         raw = [record.inflation for record in scored]
-        assert repr(max(raw)) == "0.59867897"
+        assert repr(max(raw)) == "0.5941958648"
         assert max(raw) < INFLATION_MIN
-        assert repr(min(raw)) == "-0.2100727356"
+        assert repr(min(raw)) == "-0.2140644835"
         negative = [record for record in scored if record.inflation < 0]
         assert len(negative) == 36
         assert {record.position for record in negative} == {"WR"}
@@ -433,3 +442,16 @@ class TestReport:
         assert main(args, out=stream) == 2
         assert "no scored lots" in stream.getvalue()
         assert not out_path.exists()
+
+
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
+    """A quoted ``[valuation]`` number is a named one-line config error
+    and exit 2 out of the backtest CLI too, not a ValueError traceback."""
+    stream = io.StringIO()
+    code = main(
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))], out=stream
+    )
+    printed = stream.getvalue()
+    assert code == 2
+    assert "starter_pct" in printed
+    assert "Traceback" not in printed

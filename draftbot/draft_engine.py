@@ -102,9 +102,14 @@ TAPER_ZERO_RANK = 150
 #: The PRODUCTION sheet has no such overhang. ``compute_worths`` spreads
 #: exactly ``teams * (budget - drafted_slots)`` over VORP, so its
 #: above-floor total equals the room's discretionary money BY
-#: CONSTRUCTION; while the above-floor tail stays inside
-#: ``TAPER_FULL_RANK`` the taper shaves nothing off it and the ratio
-#: opens at 1.0 with no keepers and above 1.0 with them. On draft night
+#: CONSTRUCTION, and the ratio opens at exactly 1.0 with no keepers and
+#: above 1.0 with them — at ANY sheet depth, because ``_discretionary``
+#: divides by that same untapered above-floor total. It did not always:
+#: the pool used to be taper-weighted while the room's money stayed
+#: whole, so a sheet whose priced tail ran past ``TAPER_FULL_RANK``
+#: opened above par and marked every displayed dollar up for no market
+#: reason. ``TestParAtOpenOnADeepSheet`` pins par at open now, so this
+#: paragraph is a tested claim rather than a remark. On draft night
 #: this layer is therefore actively inflating, not inert, and a
 #: genuinely below-par reading there WOULD be a market signal — one this
 #: floor discards. Raising the floor did not create that cost (at or
@@ -174,11 +179,24 @@ def _keeper_ids(keepers_by_slot: Mapping[int, Sequence[str]] | None) -> frozense
 
 
 def _discretionary(row: SheetRow) -> float:
-    """The taper-weighted dollars above the $1 floor that room money can
-    actually move. Worth basis: the sheet's worths are what the room's
-    dollars were normalized against; the keeper premium is next season's
-    money and stays out of the ratio."""
-    return _quantize(taper_weight(row.rank) * max(0.0, row.worth - FLOOR_PRICE))
+    """The dollars above the $1 floor that room money has to cover.
+
+    UNTAPERED on purpose, and the asymmetry that used to live here is the
+    reason it is spelled out. The taper has exactly one job — keeping the
+    cheap tail from receiving the inflation MULTIPLIER, which it still
+    does in :func:`inflation_adjusted_price`. It has no business in the
+    pool: a $4 tail player's $3 above the floor is money the room really
+    spends, ``_on_model_spend`` really debits it when he sells, and the
+    sheet's normalization really counts it. Taper-weighting the pool
+    while leaving the room's money whole compared a shrunken value side
+    against a full money side, which opened every position above par on
+    any sheet deep enough to reach the taper window.
+
+    Worth basis: the sheet's worths are what the room's dollars were
+    normalized against; the keeper premium is next season's money and
+    stays out of the ratio.
+    """
+    return _quantize(max(0.0, row.worth - FLOOR_PRICE))
 
 
 def positional_inflation(
