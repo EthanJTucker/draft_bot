@@ -21,7 +21,7 @@ from draftbot.draft_engine import positional_inflation
 from draftbot.tracker import DraftTracker, Sale, keepers_by_slot_from_rosters
 
 from .conftest import raw_auction_pick, raw_keeper_pick
-from .helpers_dashboard import make_tick
+from .helpers_dashboard import make_poller, make_tick, team_by_slot
 from .helpers_engine import make_board, sheet_row
 
 # The draft order as this league actually deals it: a full permutation,
@@ -371,3 +371,72 @@ def test_keeper_dollars_never_count_as_money_chasing_the_pool():
         positional_inflation(rows, priced)["WR"]
         < positional_inflation(rows, unspent, {1: ("K1",)})["WR"]
     )
+
+
+# --- the page ------------------------------------------------------------
+
+
+def _page_rows():
+    return [
+        sheet_row(1, "K1", "RB", 55.0),
+        sheet_row(2, "K2", "WR", 40.0),
+        sheet_row(3, "K3", "WR", 22.0),
+        sheet_row(4, "B", "TE", 18.0),
+    ]
+
+
+def _page_poller(config, **kwargs):
+    tracker = keeper_tracker(config, **kwargs)
+    return make_poller(
+        config,
+        [keeper_tick(nominee="B", offer=5)],
+        _page_rows(),
+        keepers_by_slot=keepers_by_slot_from_rosters(keeper_tick().draft, RAW_ROSTERS),
+        tracker=tracker,
+        my_slot=MY_SLOT,
+    )
+
+
+def test_the_verdict_is_not_withheld_on_a_priced_keeper_board(config):
+    """The live symptom: with no ``budget_<slot>`` key anywhere, the tool
+    used to blank the call for every lot of the draft. The money is real,
+    so the call is made — and the room's amber mark comes off with it."""
+    state = _page_poller(config).step()
+
+    nomination = state["nomination"]
+    assert nomination["verdict"] is not None
+    assert state["defaulted_keeper_slots"] == []
+    assert team_by_slot(state, MY_SLOT)["budget_is_default"] is False
+
+
+def test_a_board_with_no_budget_signal_still_blanks_the_verdict(config):
+    """The control the fix must not break: strip the keeper prices and the
+    same board has nothing to derive my money from, so it fails closed."""
+    tracker = DraftTracker(
+        config,
+        keepers_by_slot=keepers_by_slot_from_rosters(keeper_tick().draft, RAW_ROSTERS),
+        clock=lambda: 0.0,
+    )
+    poller = make_poller(
+        config,
+        [make_tick(nominee="B", offer=5, slot_to_roster_id=LIVE_SLOTS)],
+        _page_rows(),
+        keepers_by_slot=keepers_by_slot_from_rosters(keeper_tick().draft, RAW_ROSTERS),
+        tracker=tracker,
+        my_slot=MY_SLOT,
+    )
+    nomination = poller.step()["nomination"]
+
+    assert nomination["verdict"] is None
+    assert "league-wide default" in nomination["verdict_reason"]
+
+
+def test_my_roster_panel_lists_each_keeper_once_at_its_keeper_price(config):
+    """The panel read every keeper twice — once from the roster array with
+    a null price, once from the feed with its dollars. One row per player,
+    carrying both the price and the keeper mark."""
+    roster = _page_poller(config).step()["me"]["roster"]
+
+    assert [entry["player_id"] for entry in roster] == ["K1", "K2", "K3"]
+    assert [entry["price"] for entry in roster] == [48, 37, 19]
+    assert all(entry["keeper"] for entry in roster)

@@ -600,6 +600,13 @@ class DashboardPoller:
         if my_slot is None:
             return None
         me = board.team(my_slot)
+        my_sales = [sale for sale in board.sales if sale.draft_slot == my_slot]
+        # One row per PLAYER, not one per source. This season's keepers
+        # reach the page from the roster array and from the picks feed at
+        # once, and rendering both listed every keeper twice — once
+        # priceless, once at his keeper price. The feed's row wins where
+        # they overlap, because it carries the money the array cannot.
+        priced = {sale.player_id for sale in my_sales}
         roster = [
             {
                 "player_id": player_id,
@@ -609,6 +616,7 @@ class DashboardPoller:
                 "keeper": True,
             }
             for player_id in self._keepers_by_slot.get(my_slot, ())
+            if player_id not in priced
         ]
         roster.extend(
             {
@@ -616,10 +624,9 @@ class DashboardPoller:
                 "name": self._names.get(sale.player_id, sale.player_id),
                 "position": self._positions.get(sale.player_id),
                 "price": sale.amount,
-                "keeper": False,
+                "keeper": sale.is_keeper,
             }
-            for sale in board.sales
-            if sale.draft_slot == my_slot
+            for sale in my_sales
         )
         return {
             "slot": my_slot,
