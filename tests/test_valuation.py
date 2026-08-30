@@ -19,11 +19,14 @@ from draftbot.valuation import (
     PriceModel,
     SheetRow,
     _fit_models,
+    bench_replacement_ranks,
     build_bids,
+    build_value_sheet,
     compute_worths,
     detect_keeper_picks,
     parse_projections,
     replacement_ranks,
+    skill_slot_target,
     value_map,
 )
 from tests.helpers_valuation import projection_row
@@ -425,6 +428,200 @@ class TestWorth:
         assert set(worths.values()) == {1.0}
 
 
+class TestBlendedWorth:
+    """Worth split between the starter baseline and a deeper bench one."""
+
+    #: QB1 + 1 bench slot, 2 teams, $10: $16 discretionary. Starter
+    #: replacement is QB3 (60 pts), the bench baseline QB5 (20 pts), so
+    #: starter VORP totals 60 and bench VORP totals 200.
+    POINTS = {"a": 100.0, "b": 80.0, "c": 60.0, "d": 40.0, "e": 20.0}
+    ROSTER = {"QB": 1, "BN": 1}
+    BENCH = {"QB": 5, "RB": 1, "WR": 1, "TE": 1}
+
+    @classmethod
+    def _worths(cls, **kwargs):
+        season = parse_projections(
+            [
+                projection_row(pid, "QB", None, pts=pts)
+                for pid, pts in cls.POINTS.items()
+            ]
+        )
+        return compute_worths(
+            season, roster_slots=cls.ROSTER, teams=2, budget=10, **kwargs
+        )
+
+    def test_half_the_pool_flows_through_each_baseline(self):
+        """worth = 1 + 0.5*16*(vorp_starter/60) + 0.5*16*(vorp_bench/200).
+
+        Anti-cheat: this is the blend itself, not either endpoint. A
+        starter-only model gives a=$11.67 and c=$1.00; a bench-only model
+        gives a=$7.40 and c=$4.20; blending the two VORPs before scaling
+        (rather than the two dollar halves) gives a=$8.38.
+        """
+        worths = self._worths(bench_ranks=self.BENCH, starter_pct=0.5)
+        assert worths["a"] == pytest.approx(1 + 8 * (40 / 60) + 8 * (80 / 200))
+        assert worths["b"] == pytest.approx(1 + 8 * (20 / 60) + 8 * (60 / 200))
+        assert worths["c"] == pytest.approx(1 + 8 * (40 / 200))
+        assert worths["d"] == pytest.approx(1 + 8 * (20 / 200))
+        assert worths["e"] == 1.0
+
+    def test_the_blend_sits_strictly_between_the_two_endpoints(self):
+        """Pinned against both degenerate implementations at once: the
+        blended price of the best player is below starter-only and above
+        bench-only, and a replacement-level starter is priced above $1."""
+        blended = self._worths(bench_ranks=self.BENCH, starter_pct=0.5)
+        starter_only = self._worths(bench_ranks=self.BENCH, starter_pct=1.0)
+        bench_only = self._worths(bench_ranks=self.BENCH, starter_pct=0.0)
+        assert bench_only["a"] < blended["a"] < starter_only["a"]
+        assert starter_only["c"] == 1.0 < blended["c"] < bench_only["c"]
+
+    def test_the_normalization_invariant_survives_the_blend(self):
+        """The two halves sum to the whole discretionary pool exactly, at
+        every blend weight — the property the live max-bid math rests on."""
+        for starter_pct in (0.0, 0.25, 0.5, 0.75, 1.0):
+            worths = self._worths(bench_ranks=self.BENCH, starter_pct=starter_pct)
+            assert sum(worths.values()) - len(worths) == pytest.approx(16.0)
+
+    def test_omitting_the_bench_baseline_reproduces_the_starter_only_sheet(self):
+        """No bench ranks means no second baseline: worths are identical to
+        the starter-only model at any blend weight."""
+        legacy = self._worths()
+        assert legacy == self._worths(starter_pct=0.0)
+        assert legacy == self._worths(bench_ranks=None, starter_pct=0.5)
+        assert legacy["a"] == pytest.approx(1 + 16 * (40 / 60))
+
+    def test_kickers_and_defenses_stay_at_one_dollar_under_the_blend(self):
+        """K/DEF are outside VORP on both baselines."""
+        rows = [
+            projection_row("k1", "K", None, pts=999.0),
+            projection_row("d1", "DEF", None, pts=999.0),
+            projection_row("q1", "QB", None, pts=100.0),
+            projection_row("q2", "QB", None, pts=50.0),
+            projection_row("q3", "QB", None, pts=25.0),
+        ]
+        worths = compute_worths(
+            parse_projections(rows),
+            roster_slots={"QB": 1, "K": 1, "DEF": 1},
+            teams=1,
+            budget=10,
+            bench_ranks={"QB": 3, "RB": 1, "WR": 1, "TE": 1},
+            starter_pct=0.5,
+        )
+        assert worths["k1"] == 1.0
+        assert worths["d1"] == 1.0
+        assert worths["q2"] > 1.0
+
+    def test_a_flat_pool_divides_by_no_zero_on_either_half(self):
+        """Both denominators can be zero at once; neither may raise."""
+        season = parse_projections(
+            [projection_row(pid, "QB", None, pts=50.0) for pid in ("a", "b", "c")]
+        )
+        worths = compute_worths(
+            season,
+            roster_slots={"QB": 1, "BN": 1},
+            teams=2,
+            budget=10,
+            bench_ranks={"QB": 3, "RB": 1, "WR": 1, "TE": 1},
+            starter_pct=0.5,
+        )
+        assert set(worths.values()) == {1.0}
+
+
+class TestSkillSlotTarget:
+    """How many skill-position lots the league actually drafts."""
+
+    def test_target_excludes_ir_and_the_k_def_slots(self):
+        """12 teams x (15 drafted slots - 1 K - 1 DEF) = 156. Counting IR
+        (17 slots) or forgetting to drop K/DEF (15 slots) both give 180."""
+        assert skill_slot_target(TestWorth.ROSTER, teams=12) == 156
+
+    def test_target_reads_the_roster_shape_rather_than_a_constant(self):
+        """A different shape moves the target: 3 teams x (7 drafted - 2 K
+        - 1 DEF) = 12."""
+        roster = {"QB": 1, "RB": 1, "K": 2, "DEF": 1, "BN": 2, "IR": 1}
+        assert skill_slot_target(roster, teams=3) == 12
+
+
+def _season_picks(counts, year):
+    """One season's picks feed: ``counts`` players per position, each a
+    distinct id, every bid $5."""
+    raw = [
+        _raw_pick(f"{year}-{position}-{index}", position, 5)
+        for position in sorted(counts)
+        for index in range(counts[position])
+    ]
+    return parse_picks(raw)
+
+
+class TestBenchReplacementRanks:
+    """The deeper baseline, read off this league's own draft composition."""
+
+    #: Three seasons of very different SIZE but stated positional mix.
+    #: Shares are QB/RB/WR/TE = .1/.4/.4/.1, .1/.2/.6/.1, .2/.4/.2/.2.
+    #: Each season also drafts K and DEF, which are not skill lots.
+    HISTORY = {
+        2023: {"QB": 10, "RB": 40, "WR": 40, "TE": 10, "K": 20, "DEF": 20},
+        2024: {"QB": 5, "RB": 10, "WR": 30, "TE": 5, "K": 6, "DEF": 6},
+        2025: {"QB": 4, "RB": 8, "WR": 4, "TE": 4, "K": 2, "DEF": 2},
+    }
+
+    STARTERS = {"QB": 3, "RB": 5, "WR": 5, "TE": 3}
+
+    @classmethod
+    def _picks(cls):
+        return {
+            year: _season_picks(counts, year) for year, counts in cls.HISTORY.items()
+        }
+
+    def test_ranks_are_the_median_share_of_the_skill_pool(self):
+        """MEDIAN share x 100 skill lots = QB10 / RB40 / WR40 / TE10.
+
+        Anti-cheat: the mean share gives QB13/RB33/TE13, pooling every
+        season's raw counts gives QB11/RB34/WR44/TE11, using raw counts
+        instead of shares gives QB5/RB10, and counting the K/DEF picks in
+        the denominator drags every rank down (QB7 in 2023 alone).
+        """
+        assert bench_replacement_ranks(
+            self._picks(), self.STARTERS, skill_slots=100
+        ) == {"QB": 10, "RB": 40, "WR": 40, "TE": 10}
+
+    def test_ranks_scale_with_the_league_s_own_slot_target(self):
+        """The mix is a share, so a 200-lot league doubles every rank."""
+        assert bench_replacement_ranks(
+            self._picks(), self.STARTERS, skill_slots=200
+        ) == {"QB": 20, "RB": 80, "WR": 80, "TE": 20}
+
+    def test_a_bench_rank_never_lands_shallower_than_the_starter_rank(self):
+        """WR's derived rank is 40; a league that starts 60 WRs clamps it
+        to 60, because bench VORP below starter VORP is a bug."""
+        starters = {**self.STARTERS, "WR": 60}
+        assert bench_replacement_ranks(self._picks(), starters, skill_slots=100) == {
+            "QB": 10,
+            "RB": 40,
+            "WR": 60,
+            "TE": 10,
+        }
+
+    def test_a_thin_position_falls_back_to_its_starter_rank_and_says_so(self):
+        """One season of TE data is not a median: TE falls back to its
+        starter rank (a no-op blend at TE) and warns by name, while the
+        positions with two seasons still derive normally."""
+        picks = {
+            2024: _season_picks({"QB": 10, "RB": 40, "WR": 40, "TE": 10}, 2024),
+            2025: _season_picks({"QB": 20, "RB": 40, "WR": 40, "TE": 0}, 2025),
+        }
+        with pytest.warns(UserWarning, match="TE"):
+            ranks = bench_replacement_ranks(picks, self.STARTERS, skill_slots=100)
+        assert ranks == {"QB": 15, "RB": 40, "WR": 40, "TE": 3}
+
+    def test_no_usable_history_degrades_loudly_to_the_starter_baseline(self):
+        """An empty history must not raise; it warns for every position and
+        leaves the sheet exactly where the starter baseline puts it."""
+        with pytest.warns(UserWarning):
+            ranks = bench_replacement_ranks({}, self.STARTERS, skill_slots=100)
+        assert ranks == self.STARTERS
+
+
 def _league_config(**overrides):
     """A minimal LeagueConfig for model-fit tests (tiny two-team league);
     valuation knobs default to the decided values unless overridden."""
@@ -499,6 +696,63 @@ class TestValuationConfigFlow:
         )
         assert wide.room_price("RB", 10.0) == 12.5
         assert wide.price_source("RB", 10.0) == "band"
+
+
+class TestSheetBenchBaseline:
+    """The sheet derives its bench baseline from the picks feeds it is given."""
+
+    #: 2 teams, QB1 + 1 bench, $10: starter replacement is QB3 (60 pts) and
+    #: the derived bench baseline is QB4 (40 pts), over $16 discretionary.
+    POINTS = {"a": 100.0, "b": 80.0, "c": 60.0, "d": 40.0, "e": 20.0}
+
+    @classmethod
+    def _world(cls):
+        """A season of five QBs and two historical drafts of QBs only, so
+        the derived mix is 100% QB and the depth target is 2 x (2 - 0) = 4."""
+        seasons = {
+            2024: parse_projections([]),
+            2025: parse_projections([]),
+            2026: parse_projections(
+                [
+                    projection_row(pid, "QB", None, pts=pts)
+                    for pid, pts in cls.POINTS.items()
+                ]
+            ),
+        }
+        picks = {
+            year: _season_picks({"QB": 4, "RB": 0, "WR": 0, "TE": 0}, year)
+            for year in (2024, 2025)
+        }
+        return seasons, picks
+
+    @classmethod
+    def _worth_by_id(cls, **overrides):
+        seasons, picks = cls._world()
+        rows = build_value_sheet(
+            seasons, picks, _league_config(auction_budget=10, **overrides)
+        )
+        return {row.player_id: row.worth for row in rows}
+
+    def test_the_bench_baseline_funds_players_the_starter_cliff_left_at_a_dollar(self):
+        """QB3 is exactly replacement level on the starter baseline, so the
+        old sheet pinned him at $1. Half the pool now prices off QB4, which
+        pays him 8 * 20/120."""
+        worths = self._worth_by_id()
+        assert worths["c"] == pytest.approx(1 + 8 * (20 / 120))
+        assert worths["a"] == pytest.approx(1 + 8 * (40 / 60) + 8 * (60 / 120))
+
+    def test_starter_pct_one_restores_the_old_starter_only_sheet(self):
+        """The knob is real: all the money back on the starter baseline
+        re-pins QB3 at the $1 floor."""
+        worths = self._worth_by_id(starter_pct=1.0)
+        assert worths["c"] == 1.0
+        assert worths["a"] == pytest.approx(1 + 16 * (40 / 60))
+
+    def test_an_explicit_slot_target_overrides_the_derived_one(self):
+        """bench_skill_slots=8 pushes the bench baseline past the whole
+        five-player pool, so bench VORP is raw points."""
+        worths = self._worth_by_id(bench_skill_slots=8)
+        assert worths["c"] == pytest.approx(1 + 8 * (60 / 300))
 
 
 def _sheet_row(rank, player_id, value):

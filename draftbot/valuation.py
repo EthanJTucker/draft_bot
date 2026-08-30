@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import warnings
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -24,12 +25,21 @@ from draftbot.config import (
     DEFAULT_CURVE_CAP,
     DEFAULT_GAMMA,
     DEFAULT_MIN_BAND_SAMPLES,
+    DEFAULT_STARTER_PCT,
     LeagueConfig,
 )
 from draftbot.models import Pick
 
 #: Positions with an auction market worth modeling; K/DEF go for $1 here.
 VALUED_POSITIONS = ("QB", "RB", "WR", "TE")
+
+#: Rosterable positions with no auction market: their slots are subtracted
+#: from the drafted-slot count to get the league's skill-lot target.
+NON_SKILL_POSITIONS = ("K", "DEF")
+
+#: A position needs this many usable historical seasons before its draft
+#: composition is a median rather than an anecdote.
+MIN_BENCH_SEASONS = 2
 
 #: Sleeper serves this ADP for unranked players; it means "no ADP".
 NO_ADP_SENTINEL = 999.0
@@ -324,6 +334,76 @@ def replacement_ranks(roster_slots: Mapping[str, int], teams: int) -> dict[str, 
     return ranks
 
 
+def _drafted_slots(roster_slots: Mapping[str, int]) -> int:
+    """Drafted roster slots per team (IR spots are extra, not drafted)."""
+    return sum(count for slot, count in roster_slots.items() if slot != "IR")
+
+
+def skill_slot_target(roster_slots: Mapping[str, int], teams: int) -> int:
+    """How many QB/RB/WR/TE lots the league actually drafts league-wide.
+
+    The bench baseline's depth target: every drafted slot except the K and
+    DEF ones (IR is not drafted at all) holds a skill-position player, so
+    12 teams x (15 - 1 K - 1 DEF) = 156 skill lots for this league.
+    """
+    non_skill = sum(roster_slots.get(slot, 0) for slot in NON_SKILL_POSITIONS)
+    return teams * (_drafted_slots(roster_slots) - non_skill)
+
+
+def _skill_counts(picks: Sequence[Pick]) -> dict[str, int]:
+    """Distinct QB/RB/WR/TE players drafted in one season's picks feed."""
+    drafted: dict[str, set[str]] = {position: set() for position in VALUED_POSITIONS}
+    for pick in picks:
+        position = (pick.metadata or {}).get("position")
+        if position in VALUED_POSITIONS:
+            drafted[position].add(pick.player_id)
+    return {position: len(ids) for position, ids in drafted.items()}
+
+
+def bench_replacement_ranks(
+    picks_by_year: Mapping[int, Sequence[Pick]],
+    starter_ranks: Mapping[str, int],
+    skill_slots: int,
+) -> dict[str, int]:
+    """The deeper, bench-level replacement rank per position, read off the
+    league's own historical draft composition.
+
+    Each season contributes a positional SHARE of its skill-position picks,
+    never a raw count: the median share across seasons, scaled to the number
+    of skill lots this league drafts, is the rank of the last player the room
+    actually pays for. Sharing rather than counting makes the answer
+    independent of how many rows a season's feed happens to carry (keepers
+    included or not, a short feed, an expansion year).
+    """
+    shares: dict[str, list[float]] = {position: [] for position in VALUED_POSITIONS}
+    for year in sorted(picks_by_year):
+        counts = _skill_counts(picks_by_year[year])
+        pool = sum(counts[position] for position in VALUED_POSITIONS)
+        if pool == 0:
+            continue
+        for position in VALUED_POSITIONS:
+            if counts[position] > 0:
+                shares[position].append(counts[position] / pool)
+    ranks = {}
+    for position in VALUED_POSITIONS:
+        starter = starter_ranks[position]
+        if len(shares[position]) < MIN_BENCH_SEASONS:
+            warnings.warn(
+                f"WARNING - bench baseline for {position}: only "
+                f"{len(shares[position])} historical season(s) of draft "
+                f"composition, need {MIN_BENCH_SEASONS}. Falling back to the "
+                f"starter baseline (rank {starter}), so {position} gets no "
+                "bench pricing.",
+                stacklevel=2,
+            )
+            ranks[position] = starter
+            continue
+        ranks[position] = max(
+            starter, round(skill_slots * statistics.median(shares[position]))
+        )
+    return ranks
+
+
 def _replacement_points(
     season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
 ) -> dict[str, float]:
@@ -342,11 +422,33 @@ def _replacement_points(
     return replacement
 
 
+def _vorp(
+    season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
+) -> dict[str, float]:
+    """Points above the replacement player at ``ranks``, per player."""
+    replacement = _replacement_points(season, ranks)
+    return {
+        row.player_id: _quantize(max(0.0, row.points - replacement[row.position]))
+        for row in season.values()
+        if row.position in VALUED_POSITIONS and row.points is not None
+    }
+
+
+def _dollars_per_point(vorp: Mapping[str, float], pool: float) -> float:
+    """Rate that spreads ``pool`` dollars over the VORP total, 0.0 when
+    there is no value above replacement to spread it over."""
+    total = sum(vorp[player_id] for player_id in sorted(vorp))
+    return pool / total if total > 0 else 0.0
+
+
 def compute_worths(
     season: Mapping[str, SeasonRow],
     roster_slots: Mapping[str, int],
     teams: int,
     budget: int,
+    *,
+    bench_ranks: Mapping[str, int] | None = None,
+    starter_pct: float = DEFAULT_STARTER_PCT,
 ) -> dict[str, float]:
     """Roster-independent worth in auction dollars for every player.
 
@@ -355,20 +457,34 @@ def compute_worths(
     drafted) is spread over projected points above replacement. K/DEF and
     everyone at or below replacement are $1 roster fillers. Marginal-roster
     and inflation adjustments belong to later slices, not here.
+
+    Replacement level is TWO baselines, not one. ``starter_pct`` of the pool
+    is spread over value above the last STARTER, the rest over value above
+    the deeper ``bench_ranks`` baseline (see :func:`bench_replacement_ranks`)
+    so money keeps flowing past the starter cliff to the bench lots the room
+    actually buys. Each half is normalized on its own, so the two halves sum
+    to the whole pool exactly at every weight; omitting ``bench_ranks``
+    leaves the starter-only sheet unchanged.
     """
-    ranks = replacement_ranks(roster_slots, teams)
-    replacement = _replacement_points(season, ranks)
-    vorp = {
-        row.player_id: _quantize(max(0.0, row.points - replacement[row.position]))
-        for row in season.values()
-        if row.position in VALUED_POSITIONS and row.points is not None
-    }
-    total_vorp = sum(vorp[player_id] for player_id in sorted(vorp))
-    drafted_slots = sum(count for slot, count in roster_slots.items() if slot != "IR")
-    discretionary = teams * (budget - drafted_slots)
-    dollars_per_point = discretionary / total_vorp if total_vorp > 0 else 0.0
+    # pylint: disable=too-many-arguments  # the league shape plus the two
+    # baselines' knobs; grouping them into a record would only rename the
+    # same six numbers. The baseline knobs are keyword-only so no caller can
+    # slide a blend weight into the budget slot.
+    starter = replacement_ranks(roster_slots, teams)
+    # No bench baseline means both halves read the SAME baseline, which is
+    # arithmetically identical to the starter-only sheet at any weight.
+    bench = starter if bench_ranks is None else bench_ranks
+    starter_vorp = _vorp(season, starter)
+    bench_vorp = _vorp(season, bench)
+    discretionary = teams * (budget - _drafted_slots(roster_slots))
+    starter_rate = _dollars_per_point(starter_vorp, discretionary * starter_pct)
+    bench_rate = _dollars_per_point(bench_vorp, discretionary * (1.0 - starter_pct))
     return {
-        player_id: _quantize(FLOOR_PRICE + vorp.get(player_id, 0.0) * dollars_per_point)
+        player_id: _quantize(
+            FLOOR_PRICE
+            + starter_vorp.get(player_id, 0.0) * starter_rate
+            + bench_vorp.get(player_id, 0.0) * bench_rate
+        )
         for player_id in sorted(season)
     }
 
@@ -710,8 +826,19 @@ def build_value_sheet(
     """
     season = seasons[config.season]
     prices, keeper = _fit_models(seasons, picks_by_year, config, slot_to_roster_by_year)
+    bench = bench_replacement_ranks(
+        picks_by_year,
+        replacement_ranks(config.roster_slots, config.teams),
+        config.bench_skill_slots
+        or skill_slot_target(config.roster_slots, config.teams),
+    )
     worths = compute_worths(
-        season, config.roster_slots, config.teams, config.auction_budget
+        season,
+        config.roster_slots,
+        config.teams,
+        config.auction_budget,
+        bench_ranks=bench,
+        starter_pct=config.starter_pct,
     )
     unranked = []
     for player_id in sorted(season):

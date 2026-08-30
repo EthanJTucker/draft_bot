@@ -144,8 +144,14 @@ def world_fixture(tmp_path):
 
 def test_cli_writes_the_ranked_priced_pool(world):
     """Exit 0; CSV ranked by value desc with worth, room price, and
-    NPV-adjusted value per player; exact dollars from the tiny league:
-    $18 discretionary over 330 points of value over replacement."""
+    NPV-adjusted value per player; exact dollars from the tiny league.
+
+    $18 discretionary, half onto each replacement baseline: 330 points
+    above the STARTER baseline, 360 above the bench baseline this world's
+    own history derives (RB6, past the three-back pool, so bench RB value
+    is raw points). rb3 outranks the two floor QBs precisely because the
+    bench half funds him.
+    """
     tmp_path, _, run = world
     out_csv = tmp_path / "sheet.csv"
     code, printed = run("--out", str(out_csv))
@@ -157,9 +163,10 @@ def test_cli_writes_the_ranked_priced_pool(world):
         "room_price,price_source,keeper_premium,value"
     )
     cells = [line.split(",") for line in rows]
-    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "qb3", "qb4", "rb3"]
+    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "rb3", "qb3", "qb4"]
     by_id = {c[1]: c for c in cells}
-    assert by_id["qb1"][6] == f"{1 + 200 * 18 / 330:.2f}"  # worth
+    assert by_id["qb1"][6] == f"{1 + 9 * 200 / 330 + 9 * 200 / 360:.2f}"  # worth
+    assert by_id["rb3"][6] == f"{1 + 9 * 10 / 360:.2f}"  # bench half only
     assert by_id["rb1"][7] == "10.00"  # room price: the 6-bid band median
     assert by_id["rb1"][8] == "band"
     assert by_id["qb1"][8] == "floor"  # no QB bid history in this world
