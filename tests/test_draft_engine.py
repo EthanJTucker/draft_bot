@@ -98,7 +98,8 @@ def _par_board(sales=(), off_model=()):
 
 
 class TestPositionalInflation:
-    """Remaining money over remaining value, per position, tapered."""
+    """Remaining money over remaining value, per position, above the $1
+    floor and untapered (the taper is the multiplier's, not the pool's)."""
 
     def test_par_room_starts_at_one(self):
         """Money exactly matching the pool prices every position at par."""
@@ -211,14 +212,15 @@ class TestPositionalInflation:
 
         A $4 tail row past ``TAPER_ZERO_RANK`` holds $3 of real money the
         room has to spend, so it belongs in the denominator: dropping the
-        two tail rows shrinks the pool from $151 to $145 and lifts every
-        ratio from 208/151 to 208/145. Both readings are asserted, so a
+        two tail rows shrinks the pool from $180 to $174 and lifts every
+        ratio from 208/180 to 208/174. Both readings are asserted, so a
         denominator that quietly re-tapers itself (the defect that opened
         a deep sheet above par) fails here rather than passing on an
         equality between two numbers the floor flattened.
 
-        What the tail row must NOT get is the MULTIPLIER: at a 1.3775
-        ratio it still prices at sticker, while a top-of-board row moves.
+        What the tail row must NOT get is the MULTIPLIER: at the 1.1556
+        ratio this board opens at it still prices at sticker, while a
+        top-of-board row moves.
         """
         rows = _inflation_rows()
         top_only = [row for row in rows if row.rank < 100]
@@ -278,9 +280,20 @@ class TestPositionalInflation:
         assert inflation["RB"] == pytest.approx(1.0)
         assert inflation["WR"] == pytest.approx(1.0)
 
-    def test_keeper_premium_stays_out_of_the_ratio(self):
+    def test_keeper_premium_stays_out_of_the_ratio(self, monkeypatch):
         """The ratio prices this season's dollars: adding keeper premium
-        to a row (raising its NPV value) must not move any ratio."""
+        to a row (raising its NPV value) must not move any ratio.
+
+        Driven with the floor opened, for the same reason its two
+        neighbours above are. This board is below par, so ``INFLATION_MIN``
+        flattens BOTH sides of the equality to 1.0 and it passes just as
+        happily on a pool built from ``row.value``. That is not a spare
+        assertion: ``value`` is ``worth + keeper_premium``, so a pool
+        summing it puts next season's option money in this season's
+        denominator and marks every live price down. With the floor
+        opened the honest reading is RB 0.6078 against the mutant's
+        0.5948, and the equality bites."""
+        monkeypatch.setattr(draft_engine, "INFLATION_MIN", -1e9)
         with_premium = [
             (
                 sheet_row(row.rank, row.player_id, row.position, row.worth, 6.0)
@@ -290,9 +303,11 @@ class TestPositionalInflation:
             for row in _inflation_rows()
         ]
         board = _par_board([Sale("rb1", 60, 2)])
-        assert positional_inflation(with_premium, board) == positional_inflation(
-            _inflation_rows(), board
-        )
+        honest = positional_inflation(_inflation_rows(), board)
+        assert positional_inflation(with_premium, board) == honest
+        # Fixture guard: without this the floor could come back and the
+        # equality above would go quiet again.
+        assert honest["RB"] < 1.0
 
 
 @pytest.fixture(name="slots")
