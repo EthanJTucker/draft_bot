@@ -6,6 +6,14 @@ That is the whole point of it: ``compute_worths`` normalizes the
 above-floor total to ``teams * (budget - drafted slots)``, which is
 exactly the money an untouched room holds, so opening inflation has to be
 par — and has to stay par however deep the priced tail runs.
+
+Two layers, because the precondition spans two functions.
+``TestParAtOpenOnADeepSheet`` drives ``compute_worths`` at depth, which is
+where the arithmetic lives. ``TestParAtOpenThroughTheProductionSheet``
+drives ``build_value_sheet``, which is what actually ships rows: par is
+the room's money over the EMITTED sheet's above-floor total, so a sheet
+that prices a player above the floor and then declines to emit his row
+breaks par no matter how right the arithmetic upstream was.
 """
 
 from __future__ import annotations
@@ -14,9 +22,17 @@ import pytest
 
 from draftbot import draft_engine
 from draftbot.draft_engine import TAPER_ZERO_RANK, positional_inflation
-from draftbot.valuation import FLOOR_PRICE, SeasonRow, compute_worths
+from draftbot.models import parse_picks
+from draftbot.valuation import (
+    FLOOR_PRICE,
+    SeasonRow,
+    build_value_sheet,
+    compute_worths,
+    parse_projections,
+)
 
 from .helpers_engine import make_board, sheet_row
+from .helpers_valuation import league_config, projection_row
 
 
 def _deep_season(depths):
@@ -146,3 +162,120 @@ class TestParAtOpenOnADeepSheet:
         rows = _production_sheet(config, self.BENCH_CASES[0], self.DEPTHS)
         inflation = positional_inflation(rows, self._full_room(config))
         assert inflation["RB"] > 1.0
+
+
+def _qb_picks(year):
+    """One season's picks feed: four QBs at $5, so the derived positional
+    mix is 100% QB and the bench baseline lands where the slot target
+    says rather than where a mixed history would put it."""
+    return parse_picks(
+        [
+            {
+                "player_id": f"{year}-qb-{index}",
+                "draft_slot": 1,
+                "is_keeper": None,
+                "metadata": {"amount": "5", "position": "QB"},
+            }
+            for index in range(4)
+        ]
+    )
+
+
+#: Two teams, one QB and one bench slot, $10 each: $16 of discretionary
+#: money, which is what ``compute_worths`` normalizes the sheet against.
+#: ``bench_skill_slots`` pins the derived bench baseline at QB5.
+_TINY_LEAGUE = {"auction_budget": 10, "bench_skill_slots": 5}
+
+#: Five QBs, none with a usable ADP, on a curve that goes NEGATIVE past
+#: the third. Starter replacement is QB3 (20 pts) and the bench baseline
+#: is QB5 (-60 pts), so "d" carries 50 points of bench VORP and real
+#: dollars while his projection is -10 — neither a valid ADP nor a
+#: positive projection, which are the only two things the draftability
+#: filter used to accept.
+_NEGATIVE_TAIL_POINTS = {"a": 100.0, "b": 60.0, "c": 20.0, "d": -10.0, "e": -60.0}
+
+
+class TestParAtOpenThroughTheProductionSheet:
+    """Par at open, driven through ``build_value_sheet`` rather than
+    stopping at ``compute_worths``.
+
+    ``compute_worths`` spreading the room's money over VORP is only half
+    the precondition. The other half is that every above-floor dollar it
+    priced actually reaches the emitted sheet, because par at open is the
+    room's money over the EMITTED above-floor total. ``build_value_sheet``
+    drops rows that are neither ADP-listed nor positively projected, and
+    ``_replacement_points`` falls back to the worst player in the pool, so
+    a player with points between a negative bench replacement and zero can
+    hold real dollars and still be dropped — which silently shrinks the
+    denominator and opens the whole position above par.
+
+    Unreachable on the live feed (the real 2026 sheet opens at exactly
+    1.0), so this fixture manufactures the shape on purpose.
+    """
+
+    @staticmethod
+    def _world():
+        """Seasons and picks for ``build_value_sheet``: two empty prior
+        seasons carrying the QB-only picks history, and the 2026 board."""
+        seasons = {
+            2024: parse_projections([]),
+            2025: parse_projections([]),
+            2026: parse_projections(
+                [
+                    projection_row(pid, "QB", None, pts=points)
+                    for pid, points in sorted(_NEGATIVE_TAIL_POINTS.items())
+                ]
+            ),
+        }
+        return seasons, {year: _qb_picks(year) for year in (2024, 2025)}
+
+    @classmethod
+    def _rows(cls, **overrides):
+        config = league_config(**{**_TINY_LEAGUE, **overrides})
+        return build_value_sheet(*cls._world(), config), config
+
+    def test_the_fixture_really_prices_a_row_the_old_filter_would_drop(self):
+        """Fixture guard, stated against ``compute_worths`` directly so it
+        cannot be satisfied by the sheet it is guarding: "d" is worth more
+        than the floor, and he has neither a usable ADP nor a positive
+        projection. Without him the assertion below would pass on any
+        filter at all."""
+        seasons, picks = self._world()
+        config = league_config(**_TINY_LEAGUE)
+        worths = compute_worths(
+            seasons[2026],
+            config.roster_slots,
+            config.teams,
+            config.auction_budget,
+            bench_ranks={"QB": 5, "RB": 1, "WR": 1, "TE": 1},
+            starter_pct=config.starter_pct,
+        )
+        assert worths["d"] > FLOOR_PRICE
+        assert seasons[2026]["d"].adp is None
+        assert seasons[2026]["d"].points < 0
+        assert picks[2024]  # the bench baseline is derived, not defaulted
+
+    def test_every_above_floor_dollar_reaches_the_emitted_sheet(self):
+        """Conservation on the SHEET, which is the quantity par divides
+        by: the emitted above-floor total has to be the whole $16 the
+        room holds, not $15.02 with "d" quietly missing."""
+        rows, config = self._rows()
+        emitted = sum(
+            row.worth - FLOOR_PRICE for row in rows if row.worth > FLOOR_PRICE
+        )
+        money = config.teams * (config.auction_budget - config.drafted_slots)
+        assert emitted == pytest.approx(float(money))
+        assert "d" in {row.player_id for row in rows}
+
+    def test_an_untouched_board_opens_at_exactly_par(self, monkeypatch):
+        """The invariant itself, end to end and with both clamps opened so
+        a below-par reading cannot hide behind ``INFLATION_MIN``. Dropping
+        "d" reads 1.0649 here."""
+        monkeypatch.setattr(draft_engine, "INFLATION_MIN", -1e9)
+        monkeypatch.setattr(draft_engine, "INFLATION_MAX", 1e9)
+        rows, config = self._rows()
+        board = make_board(
+            {slot: config.auction_budget for slot in range(1, config.teams + 1)},
+            drafted_slots=config.drafted_slots,
+        )
+        assert positional_inflation(rows, board)["QB"] == pytest.approx(1.0, abs=1e-9)
