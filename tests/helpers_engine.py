@@ -49,25 +49,35 @@ def make_board(
     keeper_counts: Mapping[int, int] | None = None,
     off_model: Sequence[str] = (),
 ) -> BoardState:
-    """A consistent BoardState: spend, purchase counts, and open slots per
-    team all derive from the sales list, exactly as the tracker computes
-    them, so a test cannot claim a sale without debiting the buyer."""
+    """A consistent BoardState: spend, keeper spend, purchase counts, and
+    open slots per team all derive from the sales list, exactly as the
+    tracker computes them, so a test cannot claim a sale without debiting
+    the buyer.
+
+    A sale carrying ``is_keeper`` is a keeper the commissioner entered as
+    a priced pick: it counts toward the team's keeper count and keeper
+    spend, never toward its auction purchases, mirroring
+    ``DraftTracker._team_state``.
+    """
     keeper_counts = dict(keeper_counts or {})
     teams = []
     for slot in sorted(budgets):
-        purchases = [sale for sale in sales if sale.draft_slot == slot]
-        keepers = keeper_counts.get(slot, 0)
+        mine = [sale for sale in sales if sale.draft_slot == slot]
+        kept_sales = [sale for sale in mine if sale.is_keeper]
+        purchases = [sale for sale in mine if not sale.is_keeper]
+        keepers = keeper_counts.get(slot, 0) + len(kept_sales)
         teams.append(
             TeamState(
                 slot=slot,
                 roster_id=slot,
                 budget=budgets[slot],
                 budget_is_default=False,
-                spent=sum(sale.amount or 0 for sale in purchases),
+                spent=sum(sale.amount or 0 for sale in mine),
                 keeper_count=keepers,
                 purchase_count=len(purchases),
                 open_slots=max(0, drafted_slots - keepers - len(purchases)),
                 needs={},
+                keeper_spend=sum(sale.amount or 0 for sale in kept_sales),
             )
         )
     return BoardState(

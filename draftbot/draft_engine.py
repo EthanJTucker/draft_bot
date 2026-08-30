@@ -200,22 +200,29 @@ def positional_inflation(
     engine share one sheet — still removes that player's value from the
     remaining pool (sold is sold, whatever the price meant), so the
     denominator and with it the ratio can move. Kept players were never
-    part of the buyable pool at all.
+    part of the buyable pool at all — however they reached the board. A
+    keeper entered as a PRICED PICK is still a kept player: his chain
+    price (prior bid plus the increment, floored) is not a
+    market-clearing bid, and ``valuation.build_bids`` already refuses the
+    same rows for the same reason when fitting historical prices.
     """
-    pool = sorted(
-        (row for row in rows if row.player_id not in _keeper_ids(keepers_by_slot)),
-        key=lambda row: row.player_id,
-    )
+    pool = _buyable_pool(rows, board, keepers_by_slot)
     sold = {sale.player_id for sale in board.sales}
     initial, remaining = _pool_values(pool, sold)
     total_initial = sum(initial[position] for position in sorted(initial))
 
-    # Initial discretionary money: each team's actual budget minus the $1
-    # its starting open slots pin. open_slots + purchase_count restores
-    # the pre-sale slot count, so the figure is constant through the draft
-    # and never moves when a sale (off-model included) debits a budget.
+    # Initial discretionary money: each team's actual budget, less any
+    # keeper dollars the feed priced into its spend, minus the $1 its
+    # starting open slots pin. open_slots + purchase_count restores the
+    # pre-sale slot count, so the figure is constant through the draft and
+    # never moves when a sale (off-model included) debits a budget. The
+    # keeper term is what makes the two entry shapes agree: a keeper
+    # netted out of a budget_<slot> and the same keeper priced in the feed
+    # leave the room identical money to chase the pool. Without it a $200
+    # budget with $104 of keepers already gone reads as $200 to spend.
     money = sum(
-        team.budget - (team.open_slots + team.purchase_count) for team in board.teams
+        team.budget - team.keeper_spend - (team.open_slots + team.purchase_count)
+        for team in board.teams
     )
     spent = _on_model_spend(board, pool)
 
@@ -229,6 +236,23 @@ def positional_inflation(
         ratio = (budgeted - spent.get(position, 0.0)) / left
         inflation[position] = _quantize(max(INFLATION_MIN, min(INFLATION_MAX, ratio)))
     return inflation
+
+
+def _buyable_pool(
+    rows: Sequence[SheetRow],
+    board: BoardState,
+    keepers_by_slot: Mapping[int, Sequence[str]] | None,
+) -> list[SheetRow]:
+    """The sheet minus every kept player, from BOTH sources that carry
+    them: the roster-derived mapping and the picks feed's own keeper
+    rows. Sorted by player id so the ratio is order-independent."""
+    kept = _keeper_ids(keepers_by_slot) | {
+        sale.player_id for sale in board.sales if sale.is_keeper
+    }
+    return sorted(
+        (row for row in rows if row.player_id not in kept),
+        key=lambda row: row.player_id,
+    )
 
 
 def _pool_values(
@@ -248,14 +272,21 @@ def _pool_values(
 
 def _on_model_spend(board: BoardState, pool: Sequence[SheetRow]) -> dict[str, float]:
     """Above-floor dollars spent per position on ON-model sales only: a
-    sale flagged off-model by the board, or simply absent from the pool,
-    never debits any position's money."""
+    sale flagged off-model by the board, a KEEPER sale, or one simply
+    absent from the pool, never debits any position's money.
+
+    The keeper test is stated here as well as in the pool the caller
+    hands over, and deliberately so: the pool exclusion only bites on a
+    player this sheet prices, so an off-sheet keeper reaching this loop
+    would otherwise debit his chain price to a position whose remaining
+    value never held him.
+    """
     rows_by_id = {row.player_id: row for row in pool}
     off_model = set(board.off_model_player_ids)
     spent: dict[str, float] = {}
     for sale in board.sales:
         row = rows_by_id.get(sale.player_id)
-        if row is None or sale.player_id in off_model:
+        if row is None or sale.is_keeper or sale.player_id in off_model:
             continue
         spent[row.position] = spent.get(row.position, 0.0) + max(
             0.0, (sale.amount or 0) - FLOOR_PRICE
@@ -557,21 +588,28 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     can call it on every poll. ``my_slot`` overrides the config's roster
     id lookup (replays of drafts I was not in need one).
 
-    Raises ``ValueError`` when the board shows kept players but no
-    ``keepers_by_slot`` was supplied (silently mispricing a keeper
-    board is worse than stopping), and when the config's roster id is
-    not on the board and ``my_slot`` was not passed. An off-sheet
-    nominee prices at floor economics and never carries the pace boost.
+    Raises ``ValueError`` when the board shows kept players whose ids no
+    source names (silently mispricing a keeper board is worse than
+    stopping), and when the config's roster id is not on the board and
+    ``my_slot`` was not passed. An off-sheet nominee prices at floor
+    economics and never carries the pace boost.
     """
     slot = _resolve_my_slot(board, config) if my_slot is None else my_slot
     me = board.team(slot)
     sold = frozenset(sale.player_id for sale in board.sales)
-    keepers = _keeper_ids(keepers_by_slot)
+    # Both sources, because either alone can carry this season's keepers
+    # and the live one carries them in both. Union, never sum: the same
+    # player through two doors is one kept player.
+    keepers = _keeper_ids(keepers_by_slot) | frozenset(
+        sale.player_id for sale in board.sales if sale.is_keeper
+    )
 
     # Fail loud on the silent-keeper seam: a board that itself proves
     # keepers exist, analyzed without the keeper ids, would misprice
     # every layer (kept players wrongly stay in the pool denominators
     # and vanish from the roster) — an error, never a plausible number.
+    # Keepers the picks feed PRICES name themselves, so they satisfy this
+    # without a keepers_by_slot mapping.
     kept_on_board = sum(team.keeper_count for team in board.teams)
     if kept_on_board and not keepers:
         raise ValueError(
@@ -589,10 +627,18 @@ def analyze_player(  # pylint: disable=too-many-arguments  # the public
     inflation = inflation_map.get(row.position, 1.0) if not off_sheet else 1.0
     inflated = inflation_adjusted_price(row, inflation)
 
-    owned = [
-        *(keepers_by_slot or {}).get(slot, ()),
-        *(sale.player_id for sale in board.sales if sale.draft_slot == slot),
-    ]
+    # Deduplicated: a keeper carried by the roster array AND priced in the
+    # feed is one player on one roster slot, and counting him twice would
+    # consume a second lineup spot and understate the marginal worth of
+    # everything the team still needs.
+    owned = list(
+        dict.fromkeys(
+            [
+                *(keepers_by_slot or {}).get(slot, ()),
+                *(sale.player_id for sale in board.sales if sale.draft_slot == slot),
+            ]
+        )
+    )
     marginal = marginal_lineup_worth(player_id, owned, rows, config.roster_slots)
     need_adjusted = _need_adjusted_price(row, inflated, marginal)
 
