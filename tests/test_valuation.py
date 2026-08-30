@@ -780,16 +780,28 @@ class TestBenchReplacementRanks:
         re-listed row is a real shape: counting rows instead of players
         would inflate that position's share and deepen its bench rank.
 
-        Both seasons name the same eight RBs, but 2025 lists four of them
-        twice. De-duplicated, every season reads 8 RB of a 16-lot pool for
-        a 0.5 share and rank 50; counting rows reads 12 of 20 in 2025, so
-        the median share becomes 0.55 and the rank 55."""
+        Both seasons name the same sixteen skill players, but the 2025 feed
+        lists four of its eight RBs a second time — SEPARATE rows carrying a
+        repeated player_id, which is what a duplicated feed entry actually
+        looks like. De-duplicated, every season reads 8 RB of a 16-lot pool
+        for a 0.5 share and rank 50; counting rows reads 12 of 20 in 2025,
+        so the median share becomes 0.55 and the rank 55.
+
+        The repeats are re-parsed rather than re-used, deliberately: two
+        references to one Pick object are still one object, so a count keyed
+        on object identity would de-duplicate them and pass a test that
+        proves nothing about player_id."""
         counts = {"QB": 2, "RB": 8, "WR": 4, "TE": 2}
-        clean = _season_picks(counts, 2024)
-        doubled = _season_picks(counts, 2025)
-        repeats = [pick for pick in doubled if pick.metadata["position"] == "RB"][:4]
+        raw = [
+            _raw_pick(f"2025-{position}-{index}", position, 5)
+            for position in sorted(counts)
+            for index in range(counts[position])
+        ]
+        duplicated = (
+            raw + [dict(row) for row in raw if row["metadata"]["position"] == "RB"][:4]
+        )
         ranks = bench_replacement_ranks(
-            {2024: clean, 2025: list(doubled) + repeats},
+            {2024: _season_picks(counts, 2025), 2025: parse_picks(duplicated)},
             {"QB": 1, "RB": 1, "WR": 1, "TE": 1},
             skill_slots=100,
         )
