@@ -10,10 +10,13 @@ import io
 from datetime import timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from draftbot.snapshot import build_summary, main
 
 from .conftest import (
     REPO_ROOT,
+    VALUATION_TUNABLE_KEYS,
     FakeTransport,
     config_with_a_wrong_typed_tunable,
 )
@@ -311,17 +314,24 @@ def test_cli_default_cache_dir_follows_the_config_file(config, tmp_path):
     assert (tmp_path / "data" / "cache" / "league.json").exists()
 
 
-def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
-    """A quoted ``[valuation]`` number is a named one-line config error
-    and exit 2 here too, not a ValueError traceback."""
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the snapshot CLI, not a ValueError traceback.
+
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+    """
     out = io.StringIO()
     exit_code = main(
-        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))],
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path, key))],
         http_get=FakeTransport({}),
         clock=lambda: 1_000.0,
         out=out,
     )
     printed = out.getvalue()
     assert exit_code == 2
-    assert "starter_pct" in printed
+    assert key in printed
     assert "Traceback" not in printed

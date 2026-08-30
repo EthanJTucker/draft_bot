@@ -11,7 +11,11 @@ import io
 import pytest
 
 from draftbot.valuesheet import main
-from tests.conftest import FakeTransport, config_with_a_wrong_typed_tunable
+from tests.conftest import (
+    VALUATION_TUNABLE_KEYS,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 from tests.helpers_valuation import projection_row
 
 CONFIG_TOML = """\
@@ -312,22 +316,29 @@ def test_config_missing_required_section_exits_2(tmp_path):
     assert "Traceback" not in printed
 
 
-def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
-    """A quoted number under ``[valuation]`` is incomplete config, which
-    the README calls exit 2: a one-line error naming the offending key,
-    never a traceback out of the loader.
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the value-sheet CLI, not a ValueError traceback.
 
-    The library layer already refuses it; this pins the CLI seam, which
-    is where the operator actually meets the error. Editing a tunable
-    under time pressure has to produce a sentence, not a stack."""
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+
+    The library layer already refuses it; this pins the CLI seam,
+    which is where the operator actually meets the error. Editing a
+    tunable under time pressure has to produce a sentence, not a
+    stack.
+    """
     out = io.StringIO()
     code = main(
-        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))],
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path, key))],
         http_get=lambda url: b"{}",
         out=out,
     )
     printed = out.getvalue()
     assert code == 2
-    assert "starter_pct" in printed
+    assert key in printed
     assert "error" in printed.lower()
     assert "Traceback" not in printed

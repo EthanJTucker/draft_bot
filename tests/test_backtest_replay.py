@@ -51,7 +51,11 @@ from draftbot.sources import ReplaySource
 from draftbot.tracker import DraftTracker, default_expected_settings
 from draftbot.valuation import value_map
 
-from .conftest import REPO_ROOT, config_with_a_wrong_typed_tunable
+from .conftest import (
+    REPO_ROOT,
+    VALUATION_TUNABLE_KEYS,
+    config_with_a_wrong_typed_tunable,
+)
 
 DRAFT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
 HISTORY_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "league_history.json"
@@ -444,14 +448,22 @@ class TestReport:
         assert not out_path.exists()
 
 
-def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
-    """A quoted ``[valuation]`` number is a named one-line config error
-    and exit 2 out of the backtest CLI too, not a ValueError traceback."""
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the backtest CLI, not a ValueError traceback.
+
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+    """
     stream = io.StringIO()
     code = main(
-        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))], out=stream
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path, key))],
+        out=stream,
     )
     printed = stream.getvalue()
     assert code == 2
-    assert "starter_pct" in printed
+    assert key in printed
     assert "Traceback" not in printed

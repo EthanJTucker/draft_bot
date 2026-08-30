@@ -57,8 +57,11 @@ samples, capped at the position's max observed bid), and the NPV-adjusted
 value (worth plus the multi-year keeper option at gamma 0.8, priced from
 the league's own year-over-year price transitions with experience
 recomputed as-of-season and an age-matched pool for 8+ year RBs). The
-model tunables (band ratio, band sample gate, gamma, curve cap) live in
-the `[valuation]` section of `league_config.toml`. Writes the CSV where
+model tunables (band ratio, band sample gate, gamma, curve cap, plus the
+starter/bench blend weight and the bench baseline's depth target) live in
+the `[valuation]` section of `league_config.toml`; every one of them is
+type- and range-checked at load, so a typo on any key is a one-line error
+naming that key and exit 2, never a traceback. Writes the CSV where
 `--out` points (default `data/value_sheet_<season>.csv` next to the
 config, gitignored) and prints the top of the board (`--top`, default 30).
 The first run needs the network (or a `data/cache/` already primed by an
