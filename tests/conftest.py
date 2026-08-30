@@ -78,3 +78,20 @@ def raw_keeper_pick(
     return raw_auction_pick(pick_no, player_id, slot, amount, position) | {
         "is_keeper": True
     }
+
+
+def config_with_a_wrong_typed_tunable(tmp_path):
+    """The checked-in config with ``starter_pct`` quoted — the shape of a
+    real TOML typo on a numeric knob.
+
+    Shared because all five CLIs owe the same contract on it: a one-line
+    error naming the key and exit 2, never a traceback out of the loader.
+    """
+    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    assert "\nstarter_pct = 0.5\n" in text
+    path = tmp_path / "typo.toml"
+    path.write_text(
+        text.replace("\nstarter_pct = 0.5\n", '\nstarter_pct = "0.5"\n'),
+        encoding="utf-8",
+    )
+    return path

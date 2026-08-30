@@ -24,7 +24,11 @@ from fastapi.testclient import TestClient
 from draftbot.dashboard.app import create_app, main, run_poll_loop
 from draftbot.valuesheet import write_csv
 
-from .conftest import REPO_ROOT, FakeTransport
+from .conftest import (
+    REPO_ROOT,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 from .helpers_dashboard import (
     IDENTITY_SLOTS,
     MY_DRAFT_SLOT,
@@ -767,3 +771,24 @@ def test_cli_live_mode_requires_a_sheet():
     assert code == 2
     assert "--sheet" in out.getvalue()
     assert server.app is None
+
+
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
+    """A quoted ``[valuation]`` number names the key, exits 2, and never
+    starts the server."""
+    server = CapturingServer()
+    out = io.StringIO()
+    code = main(
+        [
+            "--replay",
+            str(FIXTURE),
+            "--config",
+            str(config_with_a_wrong_typed_tunable(tmp_path)),
+        ],
+        server=server,
+        out=out,
+    )
+    printed = out.getvalue()
+    assert code == 2
+    assert "starter_pct" in printed
+    assert "Traceback" not in printed

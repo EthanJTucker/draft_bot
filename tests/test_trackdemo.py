@@ -11,7 +11,11 @@ import json
 
 from draftbot.trackdemo import main
 
-from .conftest import REPO_ROOT, FakeTransport
+from .conftest import (
+    REPO_ROOT,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
 DRAFT_ID_2025 = "1257407146123857920"
@@ -119,3 +123,19 @@ def test_replay_demo_with_missing_config_exits_cleanly(tmp_path):
     )
     assert exit_code == 2
     assert "config" in out.getvalue().lower()
+
+
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
+    """A quoted ``[valuation]`` number is a named one-line config error
+    and exit 2 here too, not a ValueError traceback."""
+    out = io.StringIO()
+    exit_code = main(
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))],
+        http_get=FakeTransport({}),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+    printed = out.getvalue()
+    assert exit_code == 2
+    assert "starter_pct" in printed
+    assert "Traceback" not in printed

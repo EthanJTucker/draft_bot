@@ -114,8 +114,17 @@ def test_bench_baseline_tunables_load_from_config(tmp_path):
         ("starter_pct = 0.5", 'starter_pct = "half"'),
         ("starter_pct = 0.5", "starter_pct = 1.5"),
         ("starter_pct = 0.5", "starter_pct = -0.1"),
+        # TOML bools are the typo a numeric knob attracts, and Python's
+        # bool IS an int: without the explicit isinstance guard
+        # `starter_pct = true` loads as 1.0, which puts every dollar back
+        # on the starter baseline and silently disables the second one —
+        # no error, no warning, a whole pricing model switched off.
+        # `false` loads as 0.0, the bench-only extreme.
+        ("starter_pct = 0.5", "starter_pct = true"),
+        ("starter_pct = 0.5", "starter_pct = false"),
         ("bench_skill_slots = 0", 'bench_skill_slots = "156"'),
         ("bench_skill_slots = 0", "bench_skill_slots = -5"),
+        ("bench_skill_slots = 0", "bench_skill_slots = true"),
     ],
 )
 def test_a_bad_bench_tunable_is_refused_by_name(tmp_path, edit):

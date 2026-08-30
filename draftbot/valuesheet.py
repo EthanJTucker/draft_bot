@@ -208,6 +208,12 @@ def main(
             file=err,
         )
         return 2
+    except ValueError as error:
+        # A wrong-typed or out-of-range [valuation] knob is incomplete
+        # config, not a crash: load_config raises a ValueError that already
+        # names the key, so print it and exit 2 like any other bad config.
+        print(f"error: {error}", file=err)
+        return 2
     client = SleeperClient(
         config, cache_dir=args.cache_dir, http_get=http_get, clock=clock
     )
