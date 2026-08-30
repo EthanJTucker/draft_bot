@@ -80,18 +80,37 @@ def raw_keeper_pick(
     }
 
 
-def config_with_a_wrong_typed_tunable(tmp_path):
-    """The checked-in config with ``starter_pct`` quoted — the shape of a
-    real TOML typo on a numeric knob.
+#: Every [valuation] knob, paired with the checked-in line and a
+#: wrong-typed replacement of the shape a real TOML typo takes. Quoted
+#: numbers for the five numeric knobs; a truthy STRING for the flag,
+#: which is the dangerous one — with no type check "yes" is simply
+#: truthy, so it loads clean and silently changes pricing.
+WRONG_TYPED_TUNABLES = (
+    ("band_ratio", "band_ratio = 1.6", 'band_ratio = "1.6"'),
+    ("min_band_samples", "min_band_samples = 6", 'min_band_samples = "6"'),
+    ("gamma", "gamma = 0.8", 'gamma = "0.8"'),
+    ("curve_cap", "curve_cap = true", 'curve_cap = "yes"'),
+    ("starter_pct", "starter_pct = 0.5", 'starter_pct = "0.5"'),
+    ("bench_skill_slots", "bench_skill_slots = 0", 'bench_skill_slots = "0"'),
+)
 
-    Shared because all five CLIs owe the same contract on it: a one-line
-    error naming the key and exit 2, never a traceback out of the loader.
+#: Just the keys, for parametrizing the five CLI seam tests.
+VALUATION_TUNABLE_KEYS = tuple(key for key, _, _ in WRONG_TYPED_TUNABLES)
+
+
+def config_with_a_wrong_typed_tunable(tmp_path, key="starter_pct"):
+    """The checked-in config with one [valuation] knob wrong-typed — the
+    shape of a real TOML typo.
+
+    Shared because all five CLIs owe the same contract on every key in the
+    section: a one-line error naming the offending key and exit 2, never a
+    traceback out of the loader.
     """
-    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
-    assert "\nstarter_pct = 0.5\n" in text
-    path = tmp_path / "typo.toml"
-    path.write_text(
-        text.replace("\nstarter_pct = 0.5\n", '\nstarter_pct = "0.5"\n'),
-        encoding="utf-8",
+    good, bad = next(
+        (good, bad) for name, good, bad in WRONG_TYPED_TUNABLES if name == key
     )
+    text = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8")
+    assert f"\n{good}" in text, f"{good!r} is no longer the checked-in line"
+    path = tmp_path / f"typo_{key}.toml"
+    path.write_text(text.replace(f"\n{good}", f"\n{bad}"), encoding="utf-8")
     return path

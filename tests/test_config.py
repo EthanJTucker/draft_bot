@@ -125,13 +125,76 @@ def test_bench_baseline_tunables_load_from_config(tmp_path):
         ("bench_skill_slots = 0", 'bench_skill_slots = "156"'),
         ("bench_skill_slots = 0", "bench_skill_slots = -5"),
         ("bench_skill_slots = 0", "bench_skill_slots = true"),
+        # The four knobs that predate the two above owe the same contract.
+        # Each of these used to load clean and then blow up as a TypeError
+        # deep in the pricing math — except curve_cap, which never blew up
+        # at all: a non-empty string is truthy, so curve_cap = "no"
+        # silently meant "yes" and the operator got a different sheet with
+        # no error printed anywhere.
+        ("band_ratio = 1.6", 'band_ratio = "1.6"'),
+        ("band_ratio = 1.6", "band_ratio = true"),
+        # An inverted band spans adp/0.5 .. adp*0.5, which is empty for
+        # every player, so every price silently falls through to the curve.
+        ("band_ratio = 1.6", "band_ratio = 0.5"),
+        ("min_band_samples = 6", 'min_band_samples = "6"'),
+        ("min_band_samples = 6", "min_band_samples = 2.5"),
+        ("min_band_samples = 6", "min_band_samples = true"),
+        # A gate of 0 admits the EMPTY band, and the median of nothing
+        # raises rather than pricing anyone.
+        ("min_band_samples = 6", "min_band_samples = 0"),
+        ("gamma = 0.8", 'gamma = "0.8"'),
+        ("gamma = 0.8", "gamma = 1.5"),
+        ("gamma = 0.8", "gamma = -0.1"),
+        ("gamma = 0.8", "gamma = true"),
+        ("curve_cap = true", 'curve_cap = "yes"'),
+        ("curve_cap = true", 'curve_cap = "no"'),
+        ("curve_cap = true", "curve_cap = 1"),
     ],
 )
-def test_a_bad_bench_tunable_is_refused_by_name(tmp_path, edit):
+def test_a_bad_valuation_tunable_is_refused_by_name(tmp_path, edit):
     """A wrong-typed or out-of-range knob names itself in the error rather
-    than tracebacking somewhere deep in the pricing math."""
+    than tracebacking somewhere deep in the pricing math.
+
+    Every key in the [valuation] section, not a subset of it: a reader of
+    this suite should be able to conclude the whole section is guarded,
+    and that is only honest if the whole section is listed."""
     with pytest.raises(ValueError, match=edit[0].split(" =")[0]):
         load_config(_config_copy_in(tmp_path, replace=edit))
+
+
+def test_every_valuation_key_in_the_shipped_config_is_guarded(tmp_path):
+    """Anti-cheat for the hand-written list above, which goes stale the
+    moment a knob is added.
+
+    Read the [valuation] keys out of the shipped TOML and require a
+    refusal naming each one for a value of the wrong type. A seventh knob
+    added as a bare ``valuation.get`` reddens here rather than shipping as
+    a TypeError the CLIs cannot turn into a sentence."""
+    lines = (REPO_ROOT / "league_config.toml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("[valuation]")
+    end = next(n for n in range(start + 1, len(lines)) if lines[n].startswith("["))
+    section = lines[start + 1 : end]
+    keys = [
+        line.split(" =")[0]
+        for line in section
+        if " = " in line and not line.startswith("#")
+    ]
+    assert sorted(keys) == [
+        "band_ratio",
+        "bench_skill_slots",
+        "curve_cap",
+        "gamma",
+        "min_band_samples",
+        "starter_pct",
+    ]
+    for key in keys:
+        stated = next(line for line in section if line.startswith(key)).split("#")[0]
+        with pytest.raises(ValueError, match=key):
+            load_config(
+                _config_copy_in(
+                    tmp_path, replace=(stated.strip(), f'{key} = "nonsense"')
+                )
+            )
 
 
 def test_expected_draft_timers_load_from_config(tmp_path):

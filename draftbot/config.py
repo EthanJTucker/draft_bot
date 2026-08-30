@@ -59,15 +59,46 @@ def _tunable_fraction(section: Mapping, key: str, default: float) -> float:
     return float(value)
 
 
-def _tunable_count(section: Mapping, key: str, default: int) -> int:
-    """A [valuation] knob that must be a non-negative whole number."""
+def _tunable_count(section: Mapping, key: str, default: int, minimum: int = 0) -> int:
+    """A [valuation] knob that must be a whole number at or above
+    ``minimum`` (0 where zero is itself a meaningful setting)."""
     value = section.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(
-            f"[valuation] {key} must be a non-negative integer, got {value!r}"
+            f"[valuation] {key} must be an integer >= {minimum}, got {value!r}"
         )
-    if value < 0:
-        raise ValueError(f"[valuation] {key} must not be negative, got {value!r}")
+    if value < minimum:
+        raise ValueError(
+            f"[valuation] {key} must not be below {minimum}, got {value!r}"
+        )
+    return value
+
+
+def _tunable_ratio(section: Mapping, key: str, default: float) -> float:
+    """A [valuation] knob that must be a real number at or above 1.
+
+    Below 1 the ADP band spans ``adp/ratio .. adp*ratio`` backwards and so
+    is empty for every player: every price falls through to the fitted
+    curve, a whole pricing rule switched off with nothing printed.
+    """
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"[valuation] {key} must be a number >= 1, got {value!r}")
+    if float(value) < 1.0:
+        raise ValueError(f"[valuation] {key} must not be below 1, got {value!r}")
+    return float(value)
+
+
+def _tunable_flag(section: Mapping, key: str, default: bool) -> bool:
+    """A [valuation] knob that must be a real TOML boolean.
+
+    The one knob where a wrong type used to produce no error at all: every
+    non-empty string is truthy, so ``curve_cap = "no"`` loaded as ON and
+    quietly priced a different sheet.
+    """
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"[valuation] {key} must be true or false, got {value!r}")
     return value
 
 
@@ -174,10 +205,12 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
         request_timeout_seconds=http.get(
             "request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS
         ),
-        band_ratio=valuation.get("band_ratio", DEFAULT_BAND_RATIO),
-        min_band_samples=valuation.get("min_band_samples", DEFAULT_MIN_BAND_SAMPLES),
-        gamma=valuation.get("gamma", DEFAULT_GAMMA),
-        curve_cap=valuation.get("curve_cap", DEFAULT_CURVE_CAP),
+        band_ratio=_tunable_ratio(valuation, "band_ratio", DEFAULT_BAND_RATIO),
+        min_band_samples=_tunable_count(
+            valuation, "min_band_samples", DEFAULT_MIN_BAND_SAMPLES, minimum=1
+        ),
+        gamma=_tunable_fraction(valuation, "gamma", DEFAULT_GAMMA),
+        curve_cap=_tunable_flag(valuation, "curve_cap", DEFAULT_CURVE_CAP),
         starter_pct=_tunable_fraction(valuation, "starter_pct", DEFAULT_STARTER_PCT),
         bench_skill_slots=_tunable_count(
             valuation, "bench_skill_slots", DEFAULT_BENCH_SKILL_SLOTS
