@@ -35,6 +35,40 @@ DEFAULT_BAND_RATIO = 1.6
 DEFAULT_MIN_BAND_SAMPLES = 6
 DEFAULT_GAMMA = 0.8
 DEFAULT_CURVE_CAP = True
+# Share of the discretionary pool priced off the STARTER replacement
+# baseline; the rest is priced off the deeper bench baseline derived from
+# the league's own draft composition (issue #27).
+DEFAULT_STARTER_PCT = 0.5
+# 0 means "derive the bench baseline's depth target from [roster] and the
+# team count" (drafted slots minus the K and DEF slots, times teams).
+DEFAULT_BENCH_SKILL_SLOTS = 0
+
+
+def _tunable_fraction(section: Mapping, key: str, default: float) -> float:
+    """A [valuation] knob that must be a real number in 0..1 inclusive.
+
+    A typo in the TOML is a config error, not a pricing mystery: it names
+    the key and the offending value here, at load time, rather than
+    surfacing as a TypeError deep inside the worth arithmetic.
+    """
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"[valuation] {key} must be a number 0..1, got {value!r}")
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"[valuation] {key} must be between 0 and 1, got {value!r}")
+    return float(value)
+
+
+def _tunable_count(section: Mapping, key: str, default: int) -> int:
+    """A [valuation] knob that must be a non-negative whole number."""
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"[valuation] {key} must be a non-negative integer, got {value!r}"
+        )
+    if value < 0:
+        raise ValueError(f"[valuation] {key} must not be negative, got {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -73,6 +107,11 @@ class LeagueConfig:
     min_band_samples: int = DEFAULT_MIN_BAND_SAMPLES
     gamma: float = DEFAULT_GAMMA
     curve_cap: bool = DEFAULT_CURVE_CAP
+    # The two-baseline VBD blend: the share of the discretionary pool priced
+    # off the STARTER baseline, and the bench baseline's depth target in
+    # skill lots (0 = derive it from [roster] and the team count).
+    starter_pct: float = DEFAULT_STARTER_PCT
+    bench_skill_slots: int = DEFAULT_BENCH_SKILL_SLOTS
 
     def __post_init__(self):
         # frozen=True alone leaves the mapping fields mutable; wrap them in
@@ -139,4 +178,8 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> LeagueConfig:
         min_band_samples=valuation.get("min_band_samples", DEFAULT_MIN_BAND_SAMPLES),
         gamma=valuation.get("gamma", DEFAULT_GAMMA),
         curve_cap=valuation.get("curve_cap", DEFAULT_CURVE_CAP),
+        starter_pct=_tunable_fraction(valuation, "starter_pct", DEFAULT_STARTER_PCT),
+        bench_skill_slots=_tunable_count(
+            valuation, "bench_skill_slots", DEFAULT_BENCH_SKILL_SLOTS
+        ),
     )

@@ -90,6 +90,39 @@ def test_missing_valuation_section_keeps_identical_defaults(tmp_path):
     assert stripped.min_band_samples == checked_in.min_band_samples
     assert stripped.gamma == checked_in.gamma
     assert stripped.curve_cap == checked_in.curve_cap
+    assert stripped.starter_pct == checked_in.starter_pct
+    assert stripped.bench_skill_slots == checked_in.bench_skill_slots
+
+
+def test_bench_baseline_tunables_load_from_config(tmp_path):
+    """The starter/bench blend weight and the bench baseline's depth target
+    are data in the TOML. ``bench_skill_slots = 0`` means "derive the target
+    from the roster shape"."""
+    checked_in = load_config(REPO_ROOT / "league_config.toml")
+    assert checked_in.starter_pct == 0.5
+    assert checked_in.bench_skill_slots == 0
+
+    tuned = load_config(
+        _config_copy_in(tmp_path, replace=("starter_pct = 0.5", "starter_pct = 0.25"))
+    )
+    assert tuned.starter_pct == 0.25
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        ("starter_pct = 0.5", 'starter_pct = "half"'),
+        ("starter_pct = 0.5", "starter_pct = 1.5"),
+        ("starter_pct = 0.5", "starter_pct = -0.1"),
+        ("bench_skill_slots = 0", 'bench_skill_slots = "156"'),
+        ("bench_skill_slots = 0", "bench_skill_slots = -5"),
+    ],
+)
+def test_a_bad_bench_tunable_is_refused_by_name(tmp_path, edit):
+    """A wrong-typed or out-of-range knob names itself in the error rather
+    than tracebacking somewhere deep in the pricing math."""
+    with pytest.raises(ValueError, match=edit[0].split(" =")[0]):
+        load_config(_config_copy_in(tmp_path, replace=edit))
 
 
 def test_expected_draft_timers_load_from_config(tmp_path):
