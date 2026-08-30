@@ -11,7 +11,7 @@ import io
 import pytest
 
 from draftbot.valuesheet import main
-from tests.conftest import FakeTransport
+from tests.conftest import FakeTransport, config_with_a_wrong_typed_tunable
 from tests.helpers_valuation import projection_row
 
 CONFIG_TOML = """\
@@ -147,10 +147,15 @@ def test_cli_writes_the_ranked_priced_pool(world):
     NPV-adjusted value per player; exact dollars from the tiny league.
 
     $18 discretionary, half onto each replacement baseline: 330 points
-    above the STARTER baseline, 360 above the bench baseline this world's
-    own history derives (RB6, past the three-back pool, so bench RB value
-    is raw points). rb3 outranks the two floor QBs precisely because the
-    bench half funds him.
+    above the STARTER baseline and 330 above the bench baseline this
+    world's own history derives.
+
+    The bench baseline lands at RB6, deeper than this world's three-back
+    pool, so it clamps to the WORST RB rather than collapsing to zero
+    points. rb3 is that worst RB — replacement level by definition — and
+    stays a $1 filler behind the floor QBs. Zero-point replacement would
+    turn RB bench value into raw points and float rb3 above them, paid
+    for out of every other position's dollars.
     """
     tmp_path, _, run = world
     out_csv = tmp_path / "sheet.csv"
@@ -163,10 +168,11 @@ def test_cli_writes_the_ranked_priced_pool(world):
         "room_price,price_source,keeper_premium,value"
     )
     cells = [line.split(",") for line in rows]
-    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "rb3", "qb3", "qb4"]
+    assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "qb3", "qb4", "rb3"]
     by_id = {c[1]: c for c in cells}
-    assert by_id["qb1"][6] == f"{1 + 9 * 200 / 330 + 9 * 200 / 360:.2f}"  # worth
-    assert by_id["rb3"][6] == f"{1 + 9 * 10 / 360:.2f}"  # bench half only
+    assert by_id["qb1"][6] == f"{1 + 9 * 200 / 330 + 9 * 200 / 330:.2f}"  # worth
+    assert by_id["rb2"][6] == f"{1 + 9 * 10 / 330 + 9 * 10 / 330:.2f}"  # both halves
+    assert by_id["rb3"][6] == "1.00"  # replacement level on BOTH baselines
     assert by_id["rb1"][7] == "10.00"  # room price: the 6-bid band median
     assert by_id["rb1"][8] == "band"
     assert by_id["qb1"][8] == "floor"  # no QB bid history in this world
@@ -303,4 +309,25 @@ def test_config_missing_required_section_exits_2(tmp_path):
     printed = out.getvalue()
     assert "error" in printed.lower()
     assert "keeper" in printed
+    assert "Traceback" not in printed
+
+
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path):
+    """A quoted number under ``[valuation]`` is incomplete config, which
+    the README calls exit 2: a one-line error naming the offending key,
+    never a traceback out of the loader.
+
+    The library layer already refuses it; this pins the CLI seam, which
+    is where the operator actually meets the error. Editing a tunable
+    under time pressure has to produce a sentence, not a stack."""
+    out = io.StringIO()
+    code = main(
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path))],
+        http_get=lambda url: b"{}",
+        out=out,
+    )
+    printed = out.getvalue()
+    assert code == 2
+    assert "starter_pct" in printed
+    assert "error" in printed.lower()
     assert "Traceback" not in printed

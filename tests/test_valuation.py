@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from draftbot.config import LeagueConfig
+from draftbot.config import DEFAULT_STARTER_PCT, LeagueConfig
 from draftbot.models import parse_picks
 from draftbot.valuation import (
     Bid,
@@ -490,6 +490,99 @@ class TestBlendedWorth:
         assert legacy == self._worths(bench_ranks=None, starter_pct=0.5)
         assert legacy["a"] == pytest.approx(1 + 16 * (40 / 60))
 
+    def test_the_keyword_default_is_the_configured_blend_weight(self):
+        """``starter_pct``'s signature default is live API surface: this is
+        the only test that omits it while a REAL bench baseline is in play,
+        so the default actually decides something. Both directions, so a
+        default silently moved to 1.0 (which restores the pre-blend sheet
+        and disables the second baseline entirely) fails here."""
+        implied = self._worths(bench_ranks=self.BENCH)
+        assert implied == self._worths(
+            bench_ranks=self.BENCH, starter_pct=DEFAULT_STARTER_PCT
+        )
+        assert implied != self._worths(bench_ranks=self.BENCH, starter_pct=1.0)
+
+    def test_a_dead_starter_half_hands_its_money_to_the_live_half(self):
+        """Conservation when one baseline has nothing to price.
+
+        The top three are tied at the starter baseline (QB3), so starter
+        VORP is 0 for every player while the deeper QB5 baseline still
+        sees 260 points of value. Rating a zero-total half at $0/point
+        silently deletes ``starter_pct`` of the room's money from a sheet
+        that still looks completely normal — here half of $16. The whole
+        $16 has to reach the board, and nobody may sit under the floor."""
+        season = parse_projections(
+            [
+                projection_row(pid, "QB", None, pts=pts)
+                for pid, pts in {
+                    "a": 100.0,
+                    "b": 100.0,
+                    "c": 100.0,
+                    "d": 40.0,
+                    "e": 20.0,
+                }.items()
+            ]
+        )
+        worths = compute_worths(
+            season,
+            roster_slots=self.ROSTER,
+            teams=2,
+            budget=10,
+            bench_ranks=self.BENCH,
+            starter_pct=0.5,
+        )
+        assert sum(worths.values()) - len(worths) == pytest.approx(16.0)
+        assert min(worths.values()) == 1.0
+        # Degraded to the single surviving baseline, not to a scaled-down
+        # sheet: every dollar is priced off the bench VORP total of 260.
+        assert worths["a"] == pytest.approx(1 + 16 * (80 / 260))
+
+    @pytest.mark.parametrize("starter_pct", [1.5, -0.5, 2.0])
+    def test_an_out_of_range_blend_weight_is_refused_by_value(self, starter_pct):
+        """The $1 FLOOR_PRICE is a guarantee of this function, not of its
+        caller. Above 1.0 the bench half goes negative and prices players
+        under the floor (measured -$0.60 at 1.5); below 0.0 the starter
+        half inverts and worse players outprice better ones. Conservation
+        holds in both cases, so no invariant test would notice."""
+        with pytest.raises(ValueError, match="starter_pct"):
+            self._worths(bench_ranks=self.BENCH, starter_pct=starter_pct)
+
+    def test_a_bench_rank_shallower_than_the_starter_rank_is_refused(self):
+        """``bench_replacement_ranks`` clamps this, but ``compute_worths``
+        is module-public and the clamp is not its property. A shallower
+        "deeper" baseline produces a plausible, conserving, WRONG sheet."""
+        shallow = {**self.BENCH, "QB": 2}
+        with pytest.raises(ValueError, match="QB"):
+            self._worths(bench_ranks=shallow, starter_pct=0.5)
+
+    def test_a_bench_rank_past_the_pool_falls_back_to_the_worst_player(self):
+        """A rank deeper than the position's own pool must not collapse
+        replacement to ZERO points.
+
+        At zero, that position's bench VORP becomes raw points: every
+        player at it prices above $1 — including the worst, who IS
+        replacement level by definition — and the dollars come out of
+        every other position. With four TEs and a bench rank of 6, TE4
+        has to stay a $1 filler."""
+        rows = [
+            projection_row(f"te{index}", "TE", None, pts=points)
+            for index, points in enumerate([80.0, 60.0, 40.0, 20.0], start=1)
+        ] + [
+            projection_row("q1", "QB", None, pts=100.0),
+            projection_row("q2", "QB", None, pts=50.0),
+            projection_row("q3", "QB", None, pts=25.0),
+        ]
+        worths = compute_worths(
+            parse_projections(rows),
+            roster_slots=self.ROSTER,
+            teams=2,
+            budget=10,
+            bench_ranks={"QB": 3, "RB": 1, "WR": 1, "TE": 6},
+            starter_pct=0.5,
+        )
+        assert worths["te4"] == 1.0
+        assert sum(worths.values()) - len(worths) == pytest.approx(16.0)
+
     def test_kickers_and_defenses_stay_at_one_dollar_under_the_blend(self):
         """K/DEF are outside VORP on both baselines."""
         rows = [
@@ -610,9 +703,97 @@ class TestBenchReplacementRanks:
             2024: _season_picks({"QB": 10, "RB": 40, "WR": 40, "TE": 10}, 2024),
             2025: _season_picks({"QB": 20, "RB": 40, "WR": 40, "TE": 0}, 2025),
         }
-        with pytest.warns(UserWarning, match="TE"):
+        with pytest.warns(UserWarning, match="TE") as caught:
             ranks = bench_replacement_ranks(picks, self.STARTERS, skill_slots=100)
         assert ranks == {"QB": 15, "RB": 40, "WR": 40, "TE": 3}
+        # The message must not read as "priced as before". A fallback
+        # position is still priced off a bench half normalized across all
+        # four positions, so its dollars move — measured at a 25% swing on
+        # a constructed two-season history. An operator who reads "no bench
+        # pricing" and skips the sheet is reading the opposite of the truth.
+        message = str(caught[0].message)
+        assert "gets no bench pricing" not in message
+        assert "no DEEPER baseline" in message
+        assert "dollars still move" in message
+
+    #: Every season drafts the same number at each position, so every
+    #: median share is EXACTLY 0.25 and the rank is a pure function of the
+    #: slot target — which is what makes the rounding rule observable.
+    EVEN_HISTORY = {
+        year: {"QB": 5, "RB": 5, "WR": 5, "TE": 5, "K": 3, "DEF": 3}
+        for year in (2023, 2024, 2025)
+    }
+
+    @classmethod
+    def _even_picks(cls):
+        return {
+            year: _season_picks(counts, year)
+            for year, counts in cls.EVEN_HISTORY.items()
+        }
+
+    @pytest.mark.parametrize(
+        "skill_slots,expected",
+        [
+            (69, 17),  # 17.25 -> 17; math.ceil would say 18
+            (54, 14),  # 13.50 -> 14; math.floor and int() would say 13
+            (50, 12),  # 12.50 -> 12; round-half-UP would say 13
+        ],
+    )
+    def test_the_rank_rounds_to_nearest_with_ties_to_even(self, skill_slots, expected):
+        """The rounding rule itself, on deliberately fractional products.
+
+        Every other bench fixture lands ``skill_slots * median(share)`` on
+        an exact integer, where ``round``, ``math.floor``, ``int`` and
+        ``math.ceil`` are indistinguishable — and on the real feeds the
+        difference moves three of the four ranks that drive prices. These
+        three products separate all four: 17.25 kills ``ceil``, 13.5 kills
+        ``floor`` and ``int``, and 12.5 pins Python's round-half-to-even
+        against a half-up implementation.
+        """
+        ranks = bench_replacement_ranks(
+            self._even_picks(), self.STARTERS, skill_slots=skill_slots
+        )
+        assert ranks == {position: expected for position in ("QB", "RB", "WR", "TE")}
+
+    def test_an_undrafted_season_counts_as_a_zero_share_not_a_missing_one(self):
+        """A season the room drafted no TE in is evidence ABOUT TE, and
+        the median has to see it.
+
+        TE shares here are 0.0 / 0.05 / 0.15. Over all three seasons the
+        median is 0.05 and the bench rank is 5; dropping the zero takes the
+        median over only the seasons the room wanted a TE, which reads 0.10
+        and rank 10 — twice as deep a baseline for the position the room
+        demonstrably wants LEAST, which raises its VORP and pulls dollars
+        toward it. TE was drafted in two seasons, so this is the derived
+        path, not the fallback: no warning is expected."""
+        picks = {
+            2023: _season_picks({"QB": 10, "RB": 45, "WR": 45, "TE": 0}, 2023),
+            2024: _season_picks({"QB": 10, "RB": 45, "WR": 40, "TE": 5}, 2024),
+            2025: _season_picks({"QB": 10, "RB": 40, "WR": 35, "TE": 15}, 2025),
+        }
+        ranks = bench_replacement_ranks(picks, self.STARTERS, skill_slots=100)
+        assert ranks["TE"] == 5
+
+    def test_a_repeated_player_id_counts_once(self):
+        """Distinct PLAYERS, not feed rows. The 2025 feed is known to carry
+        unflagged keeper rows entered as ordinary picks, so a duplicated or
+        re-listed row is a real shape: counting rows instead of players
+        would inflate that position's share and deepen its bench rank.
+
+        Both seasons name the same eight RBs, but 2025 lists four of them
+        twice. De-duplicated, every season reads 8 RB of a 16-lot pool for
+        a 0.5 share and rank 50; counting rows reads 12 of 20 in 2025, so
+        the median share becomes 0.55 and the rank 55."""
+        counts = {"QB": 2, "RB": 8, "WR": 4, "TE": 2}
+        clean = _season_picks(counts, 2024)
+        doubled = _season_picks(counts, 2025)
+        repeats = [pick for pick in doubled if pick.metadata["position"] == "RB"][:4]
+        ranks = bench_replacement_ranks(
+            {2024: clean, 2025: list(doubled) + repeats},
+            {"QB": 1, "RB": 1, "WR": 1, "TE": 1},
+            skill_slots=100,
+        )
+        assert ranks["RB"] == 50
 
     def test_no_usable_history_degrades_loudly_to_the_starter_baseline(self):
         """An empty history must not raise; it warns for every position and

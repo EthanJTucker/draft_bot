@@ -376,24 +376,39 @@ def bench_replacement_ranks(
     included or not, a short feed, an expansion year).
     """
     shares: dict[str, list[float]] = {position: [] for position in VALUED_POSITIONS}
+    drafted_seasons: dict[str, int] = {position: 0 for position in VALUED_POSITIONS}
     for year in sorted(picks_by_year):
         counts = _skill_counts(picks_by_year[year])
         pool = sum(counts[position] for position in VALUED_POSITIONS)
         if pool == 0:
             continue
         for position in VALUED_POSITIONS:
+            # A season the room drafted nobody at this position contributes
+            # a real 0.0 share, not a missing observation. Skipping it would
+            # take this position's median over only the seasons the room DID
+            # want it, while every other position's median spans them all —
+            # which deepens the baseline of the position the room wants
+            # least, raising its VORP and pulling dollars toward it. Exactly
+            # backwards, so the zero is recorded.
+            shares[position].append(counts[position] / pool)
             if counts[position] > 0:
-                shares[position].append(counts[position] / pool)
+                drafted_seasons[position] += 1
     ranks = {}
     for position in VALUED_POSITIONS:
         starter = starter_ranks[position]
-        if len(shares[position]) < MIN_BENCH_SEASONS:
+        # Seasons the position was actually drafted in, not seasons
+        # observed: three seasons of zeroes is no evidence of depth.
+        if drafted_seasons[position] < MIN_BENCH_SEASONS:
             warnings.warn(
                 f"WARNING - bench baseline for {position}: only "
-                f"{len(shares[position])} historical season(s) of draft "
-                f"composition, need {MIN_BENCH_SEASONS}. Falling back to the "
-                f"starter baseline (rank {starter}), so {position} gets no "
-                "bench pricing.",
+                f"{drafted_seasons[position]} historical season(s) with a "
+                f"{position} drafted, need {MIN_BENCH_SEASONS}. Falling back "
+                f"to the starter baseline (rank {starter}), so {position} "
+                "gets no DEEPER baseline. Its dollars still move: the bench "
+                "half of the pool is normalized across all four positions, "
+                "so this position is now priced off the starter baseline "
+                "against a denominator the other positions' deeper value "
+                "inflates.",
                 stacklevel=2,
             )
             ranks[position] = starter
@@ -407,8 +422,15 @@ def bench_replacement_ranks(
 def _replacement_points(
     season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
 ) -> dict[str, float]:
-    """Projected points of the replacement-level player per position (0.0
-    when the pool is shallower than the replacement rank)."""
+    """Projected points of the replacement-level player per position.
+
+    A rank deeper than the position's own pool falls back to the WORST
+    player in it, never to 0.0 points: at zero the position's VORP becomes
+    raw points, every player at it — including the definitionally
+    replacement-level worst one — prices above the $1 floor, and the
+    dollars come out of every other position. An empty pool is the only
+    case with nothing to fall back to.
+    """
     replacement = {}
     for position, rank in sorted(ranks.items()):
         pool = sorted(
@@ -418,7 +440,10 @@ def _replacement_points(
                 if row.position == position and row.points is not None
             ),
         )
-        replacement[position] = -pool[rank - 1][0] if len(pool) >= rank else 0.0
+        if not pool:
+            replacement[position] = 0.0
+            continue
+        replacement[position] = -pool[min(rank, len(pool)) - 1][0]
     return replacement
 
 
@@ -439,6 +464,56 @@ def _dollars_per_point(vorp: Mapping[str, float], pool: float) -> float:
     there is no value above replacement to spread it over."""
     total = sum(vorp[player_id] for player_id in sorted(vorp))
     return pool / total if total > 0 else 0.0
+
+
+def _split_pool(
+    discretionary: float,
+    starter_pct: float,
+    starter_vorp: Mapping[str, float],
+    bench_vorp: Mapping[str, float],
+) -> tuple[float, float]:
+    """The two halves of the discretionary pool, with a dead half's money
+    handed to the surviving one.
+
+    A half whose VORP total is zero has nothing to spread its dollars over,
+    and ``_dollars_per_point`` would quietly rate it at 0.0 — silently
+    deleting ``starter_pct`` of the room's money from a sheet that still
+    looks normal. (One half can die alone: ``bench >= starter`` makes bench
+    VORP dominate pointwise, so a board flat from rank 1 through every
+    starter rank zeroes the starter half while the bench half stays live.)
+    Routing the dead half's dollars to the live one degrades the blend to a
+    single baseline and still spends the whole pool, so conservation holds
+    at every weight. Both halves dead means a genuinely flat board with no
+    value above replacement anywhere: everyone is a $1 filler and there is
+    nothing to spread, which is the honest answer.
+    """
+    starter_pool = discretionary * starter_pct
+    bench_pool = discretionary * (1.0 - starter_pct)
+    starter_live = sum(starter_vorp.values()) > 0
+    bench_live = sum(bench_vorp.values()) > 0
+    if not starter_live and bench_live:
+        return (0.0, discretionary)
+    if not bench_live and starter_live:
+        return (discretionary, 0.0)
+    return (starter_pool, bench_pool)
+
+
+def _check_bench_is_deeper(
+    starter: Mapping[str, int], bench: Mapping[str, int]
+) -> None:
+    """Refuse a "deeper" baseline that is shallower than the starter one.
+
+    The clamp lives in :func:`bench_replacement_ranks`, but
+    :func:`compute_worths` is module-public and the clamp is not its
+    property. A shallower bench rank produces a plausible, conserving,
+    WRONG sheet, so no invariant test would catch it.
+    """
+    for position, rank in sorted(bench.items()):
+        if position in starter and rank < starter[position]:
+            raise ValueError(
+                f"bench rank for {position} ({rank}) is shallower than its "
+                f"starter rank ({starter[position]})"
+            )
 
 
 def compute_worths(
@@ -470,15 +545,24 @@ def compute_worths(
     # baselines' knobs; grouping them into a record would only rename the
     # same six numbers. The baseline knobs are keyword-only so no caller can
     # slide a blend weight into the budget slot.
+    if not 0.0 <= starter_pct <= 1.0:
+        # Out of range the losing half goes NEGATIVE, which prices players
+        # below the $1 floor (and inverts the board past 1.0). The floor is
+        # a guarantee of this function, not of whoever called it.
+        raise ValueError(f"starter_pct must be between 0 and 1, got {starter_pct!r}")
     starter = replacement_ranks(roster_slots, teams)
     # No bench baseline means both halves read the SAME baseline, which is
     # arithmetically identical to the starter-only sheet at any weight.
     bench = starter if bench_ranks is None else bench_ranks
+    _check_bench_is_deeper(starter, bench)
     starter_vorp = _vorp(season, starter)
     bench_vorp = _vorp(season, bench)
     discretionary = teams * (budget - _drafted_slots(roster_slots))
-    starter_rate = _dollars_per_point(starter_vorp, discretionary * starter_pct)
-    bench_rate = _dollars_per_point(bench_vorp, discretionary * (1.0 - starter_pct))
+    starter_pool, bench_pool = _split_pool(
+        discretionary, starter_pct, starter_vorp, bench_vorp
+    )
+    starter_rate = _dollars_per_point(starter_vorp, starter_pool)
+    bench_rate = _dollars_per_point(bench_vorp, bench_pool)
     return {
         player_id: _quantize(
             FLOOR_PRICE

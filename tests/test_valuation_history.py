@@ -21,10 +21,13 @@ from draftbot.models import parse_picks
 from draftbot.valuation import (
     KeeperModel,
     PriceModel,
+    bench_replacement_ranks,
     build_bids,
     build_transition_samples,
     detect_keeper_picks,
     parse_projections,
+    replacement_ranks,
+    skill_slot_target,
 )
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "league_history.json"
@@ -300,3 +303,41 @@ class TestOptionValueSanityBands:
         assert options.widen_level == 0
         assert 8 <= options.pool_size <= 40
         assert 0.0 <= options.one_year <= 5.0
+
+
+class TestBenchBaselineOnTheRealHistory:
+    """The derived bench ranks, witnessed against the league's own record.
+
+    The bench baseline is invented at runtime from three seasons of draft
+    composition, and it moves every dollar on the board. Every other test
+    of it runs on hand-built share fixtures, which can only prove the
+    arithmetic is self-consistent. This one pins the actual numbers the
+    real feeds produce, so a rounding rule, a share denominator, or a
+    de-duplication that quietly changes fails against the record rather
+    than against another fixture.
+    """
+
+    def test_the_baselines_inputs_are_the_leagues_real_shape(self, config):
+        """The two inputs the derivation runs on, straight from the real
+        config: the starter cliff per position, and the 156 skill lots
+        this league drafts (12 x (15 drafted - 1 K - 1 DEF))."""
+        assert replacement_ranks(config.roster_slots, config.teams) == {
+            "QB": 13,
+            "RB": 31,
+            "WR": 29,
+            "TE": 14,
+        }
+        assert skill_slot_target(config.roster_slots, config.teams) == 156
+
+    def test_derived_ranks_match_the_committed_draft_record(self, history, config):
+        """Counted by hand off the committed picks fixture: 2023
+        QB18/RB44/WR46/TE15 of a 123 skill pool, 2024 QB20/RB53/WR65/TE18
+        of 156, 2025 QB21/RB56/WR64/TE18 of 159. The per-position medians
+        are .132075/.352201/.402516/.115385, and 156 skill lots put the
+        ranks at QB21/RB55/WR63/TE18."""
+        ranks = bench_replacement_ranks(
+            history.picks,
+            replacement_ranks(config.roster_slots, config.teams),
+            skill_slot_target(config.roster_slots, config.teams),
+        )
+        assert ranks == {"QB": 21, "RB": 55, "WR": 63, "TE": 18}
