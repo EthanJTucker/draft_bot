@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import TextIO
 
 from draftbot.config import LeagueConfig, load_config
-from draftbot.draft_engine import INFLATION_MIN, analyze_player, taper_weight
+from draftbot.draft_engine import INFLATION_MIN, analyze_player
 from draftbot.models import parse_picks
 from draftbot.sources import ReplaySource
 from draftbot.tracker import DraftTracker, default_expected_settings
@@ -532,7 +532,15 @@ _DISCRETIONARY_2025 = 1464
 #: the clamp; ``test_the_raw_pre_clamp_ratio_census`` pins these same
 #: values. Fixture properties like ``_DISCRETIONARY_2025``: re-measure
 #: them when the absorbable-pool change moves the denominator.
-_RAW_RATIO_MIN_2025 = -0.2100727356
+#:
+#: Re-measured once already, when the inflation pool stopped being
+#: taper-weighted (the ratio's value side and its money side have to be
+#: the same quantity, or a deep sheet opens above par). That widened this
+#: fixture's denominator from $2445.38 to $2463.83 and moved the census
+#: from -0.2100727356 / max 0.59867897. Nothing the report CONCLUDES
+#: moved: every scored lot still sits under par and still clamps, so
+#: every statistic in the report is unchanged to the last decimal.
+_RAW_RATIO_MIN_2025 = -0.2140644835
 _NEGATIVE_NUMERATOR_LOTS_2025 = 36
 
 
@@ -543,10 +551,10 @@ def _report_finding(records: Sequence[BacktestRecord], rows: Sequence[SheetRow])
     early, mid, late = segment_stats(records, "running")
     clamped = sum(1 for record in scored if record.inflation == INFLATION_MIN)
     sold = {record.player_id for record in records}
+    # Above-floor, UNtapered: this figure exists to explain the ratio's
+    # denominator, and the denominator counts every above-floor dollar.
     unsold = sum(
-        taper_weight(row.rank) * max(0.0, row.worth - FLOOR_PRICE)
-        for row in rows
-        if row.player_id not in sold
+        max(0.0, row.worth - FLOOR_PRICE) for row in rows if row.player_id not in sold
     )
     return f"""## Finding: the floor holds every 2025 lot at par
 
@@ -568,13 +576,13 @@ left to drift.
 Why the raw ratio is below par everywhere: the denominator counts EVERY
 unsold sheet row as competing for the room's money, but an auction only
 absorbs 180 lots. The overhang never clears — when the last lot closes,
-${unsold:.0f} of taper-weighted above-floor sheet value is still
+${unsold:.0f} of above-floor sheet value is still
 unsold against the ${_DISCRETIONARY_2025} of discretionary money the
 room started with, so about
 {100 * unsold / _DISCRETIONARY_2025:.0f}% of a room's money worth of
 priced value never sells. That denominator alone accounts for below
 par: at the opening lot no money has been spent, so every position's
-ratio is exactly the room's money over the whole taper-weighted pool.
+ratio is exactly the room's money over the whole above-floor pool.
 
 Below par is not the floor of it, though, and a denominator re-size
 will not reach the rest. On {_NEGATIVE_NUMERATOR_LOTS_2025} of the
@@ -846,6 +854,12 @@ def main(argv: list[str] | None = None, out: TextIO | None = None) -> int:
         return 2
     except (tomllib.TOMLDecodeError, json.JSONDecodeError, KeyError) as error:
         print(f"error: unparseable input: {error}", file=err)
+        return 2
+    except ValueError as error:
+        # A wrong-typed or out-of-range [valuation] knob is incomplete
+        # config, not a crash: load_config raises a ValueError that already
+        # names the key, so print it and exit 2 like any other bad config.
+        print(f"error: {error}", file=err)
         return 2
 
     rows = build_history_price_sheet(history, config, season=args.season)

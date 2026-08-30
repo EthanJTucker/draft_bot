@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import statistics
+import warnings
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -24,12 +25,21 @@ from draftbot.config import (
     DEFAULT_CURVE_CAP,
     DEFAULT_GAMMA,
     DEFAULT_MIN_BAND_SAMPLES,
+    DEFAULT_STARTER_PCT,
     LeagueConfig,
 )
 from draftbot.models import Pick
 
 #: Positions with an auction market worth modeling; K/DEF go for $1 here.
 VALUED_POSITIONS = ("QB", "RB", "WR", "TE")
+
+#: Rosterable positions with no auction market: their slots are subtracted
+#: from the drafted-slot count to get the league's skill-lot target.
+NON_SKILL_POSITIONS = ("K", "DEF")
+
+#: A position needs this many usable historical seasons before its draft
+#: composition is a median rather than an anecdote.
+MIN_BENCH_SEASONS = 2
 
 #: Sleeper serves this ADP for unranked players; it means "no ADP".
 NO_ADP_SENTINEL = 999.0
@@ -324,11 +334,103 @@ def replacement_ranks(roster_slots: Mapping[str, int], teams: int) -> dict[str, 
     return ranks
 
 
+def _drafted_slots(roster_slots: Mapping[str, int]) -> int:
+    """Drafted roster slots per team (IR spots are extra, not drafted)."""
+    return sum(count for slot, count in roster_slots.items() if slot != "IR")
+
+
+def skill_slot_target(roster_slots: Mapping[str, int], teams: int) -> int:
+    """How many QB/RB/WR/TE lots the league actually drafts league-wide.
+
+    The bench baseline's depth target: every drafted slot except the K and
+    DEF ones (IR is not drafted at all) holds a skill-position player, so
+    12 teams x (15 - 1 K - 1 DEF) = 156 skill lots for this league.
+    """
+    non_skill = sum(roster_slots.get(slot, 0) for slot in NON_SKILL_POSITIONS)
+    return teams * (_drafted_slots(roster_slots) - non_skill)
+
+
+def _skill_counts(picks: Sequence[Pick]) -> dict[str, int]:
+    """Distinct QB/RB/WR/TE players drafted in one season's picks feed."""
+    drafted: dict[str, set[str]] = {position: set() for position in VALUED_POSITIONS}
+    for pick in picks:
+        position = (pick.metadata or {}).get("position")
+        if position in VALUED_POSITIONS:
+            drafted[position].add(pick.player_id)
+    return {position: len(ids) for position, ids in drafted.items()}
+
+
+def bench_replacement_ranks(
+    picks_by_year: Mapping[int, Sequence[Pick]],
+    starter_ranks: Mapping[str, int],
+    skill_slots: int,
+) -> dict[str, int]:
+    """The deeper, bench-level replacement rank per position, read off the
+    league's own historical draft composition.
+
+    Each season contributes a positional SHARE of its skill-position picks,
+    never a raw count: the median share across seasons, scaled to the number
+    of skill lots this league drafts, is the rank of the last player the room
+    actually pays for. Sharing rather than counting makes the answer
+    independent of how many rows a season's feed happens to carry (keepers
+    included or not, a short feed, an expansion year).
+    """
+    shares: dict[str, list[float]] = {position: [] for position in VALUED_POSITIONS}
+    drafted_seasons: dict[str, int] = {position: 0 for position in VALUED_POSITIONS}
+    for year in sorted(picks_by_year):
+        counts = _skill_counts(picks_by_year[year])
+        pool = sum(counts[position] for position in VALUED_POSITIONS)
+        if pool == 0:
+            continue
+        for position in VALUED_POSITIONS:
+            # A season the room drafted nobody at this position contributes
+            # a real 0.0 share, not a missing observation. Skipping it would
+            # take this position's median over only the seasons the room DID
+            # want it, while every other position's median spans them all —
+            # which deepens the baseline of the position the room wants
+            # least, raising its VORP and pulling dollars toward it. Exactly
+            # backwards, so the zero is recorded.
+            shares[position].append(counts[position] / pool)
+            if counts[position] > 0:
+                drafted_seasons[position] += 1
+    ranks = {}
+    for position in VALUED_POSITIONS:
+        starter = starter_ranks[position]
+        # Seasons the position was actually drafted in, not seasons
+        # observed: three seasons of zeroes is no evidence of depth.
+        if drafted_seasons[position] < MIN_BENCH_SEASONS:
+            warnings.warn(
+                f"WARNING - bench baseline for {position}: only "
+                f"{drafted_seasons[position]} historical season(s) with a "
+                f"{position} drafted, need {MIN_BENCH_SEASONS}. Falling back "
+                f"to the starter baseline (rank {starter}), so {position} "
+                "gets no DEEPER baseline. Its dollars still move: the bench "
+                "half of the pool is normalized across all four positions, "
+                "so this position is now priced off the starter baseline "
+                "against a denominator the other positions' deeper value "
+                "inflates.",
+                stacklevel=2,
+            )
+            ranks[position] = starter
+            continue
+        ranks[position] = max(
+            starter, round(skill_slots * statistics.median(shares[position]))
+        )
+    return ranks
+
+
 def _replacement_points(
     season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
 ) -> dict[str, float]:
-    """Projected points of the replacement-level player per position (0.0
-    when the pool is shallower than the replacement rank)."""
+    """Projected points of the replacement-level player per position.
+
+    A rank deeper than the position's own pool falls back to the WORST
+    player in it, never to 0.0 points: at zero the position's VORP becomes
+    raw points, every player at it — including the definitionally
+    replacement-level worst one — prices above the $1 floor, and the
+    dollars come out of every other position. An empty pool is the only
+    case with nothing to fall back to.
+    """
     replacement = {}
     for position, rank in sorted(ranks.items()):
         pool = sorted(
@@ -338,8 +440,90 @@ def _replacement_points(
                 if row.position == position and row.points is not None
             ),
         )
-        replacement[position] = -pool[rank - 1][0] if len(pool) >= rank else 0.0
+        if not pool:
+            replacement[position] = 0.0
+            continue
+        replacement[position] = -pool[min(rank, len(pool)) - 1][0]
     return replacement
+
+
+def _vorp(
+    season: Mapping[str, SeasonRow], ranks: Mapping[str, int]
+) -> dict[str, float]:
+    """Points above the replacement player at ``ranks``, per player."""
+    replacement = _replacement_points(season, ranks)
+    return {
+        row.player_id: _quantize(max(0.0, row.points - replacement[row.position]))
+        for row in season.values()
+        if row.position in VALUED_POSITIONS and row.points is not None
+    }
+
+
+def _dollars_per_point(vorp: Mapping[str, float], pool: float) -> float:
+    """Rate that spreads ``pool`` dollars over the VORP total, 0.0 when
+    there is no value above replacement to spread it over."""
+    total = sum(vorp[player_id] for player_id in sorted(vorp))
+    return pool / total if total > 0 else 0.0
+
+
+def _split_pool(
+    discretionary: float,
+    starter_pct: float,
+    starter_vorp: Mapping[str, float],
+    bench_vorp: Mapping[str, float],
+) -> tuple[float, float]:
+    """The two halves of the discretionary pool, with a dead half's money
+    handed to the surviving one.
+
+    A half whose VORP total is zero has nothing to spread its dollars over,
+    and ``_dollars_per_point`` would quietly rate it at 0.0 — silently
+    deleting ``starter_pct`` of the room's money from a sheet that still
+    looks normal. (One half can die alone: ``bench >= starter`` makes bench
+    VORP dominate pointwise, so a board flat from rank 1 through every
+    starter rank zeroes the starter half while the bench half stays live.)
+    Routing the dead half's dollars to the live one degrades the blend to a
+    single baseline and still spends the whole pool, so conservation holds
+    at every weight. Both halves dead means a genuinely flat board with no
+    value above replacement anywhere: everyone is a $1 filler and there is
+    nothing to spread, which is the honest answer.
+    """
+    starter_pool = discretionary * starter_pct
+    bench_pool = discretionary * (1.0 - starter_pct)
+    starter_live = sum(starter_vorp.values()) > 0
+    bench_live = sum(bench_vorp.values()) > 0
+    if not starter_live and bench_live:
+        return (0.0, discretionary)
+    if not bench_live and starter_live:
+        return (discretionary, 0.0)
+    return (starter_pool, bench_pool)
+
+
+def _check_bench_is_deeper(
+    starter: Mapping[str, int], bench: Mapping[str, int]
+) -> None:
+    """Refuse a bench baseline missing a position, or shallower than the
+    starter one.
+
+    The clamp lives in :func:`bench_replacement_ranks`, but
+    :func:`compute_worths` is module-public and the clamp is not its
+    property. A shallower bench rank produces a plausible, conserving,
+    WRONG sheet, so no invariant test would catch it. A MISSING position
+    used to surface as a bare ``KeyError: 'TE'`` out of ``_vorp``, naming
+    neither the argument at fault nor what was wrong with it. Extra
+    positions in ``bench`` are harmless and stay allowed.
+    """
+    missing = sorted(set(starter) - set(bench))
+    if missing:
+        raise ValueError(
+            f"bench_ranks has no rank for {', '.join(missing)}; every valued "
+            f"position needs one ({', '.join(sorted(starter))})"
+        )
+    for position, rank in sorted(bench.items()):
+        if position in starter and rank < starter[position]:
+            raise ValueError(
+                f"bench rank for {position} ({rank}) is shallower than its "
+                f"starter rank ({starter[position]})"
+            )
 
 
 def compute_worths(
@@ -347,6 +531,9 @@ def compute_worths(
     roster_slots: Mapping[str, int],
     teams: int,
     budget: int,
+    *,
+    bench_ranks: Mapping[str, int] | None = None,
+    starter_pct: float = DEFAULT_STARTER_PCT,
 ) -> dict[str, float]:
     """Roster-independent worth in auction dollars for every player.
 
@@ -355,20 +542,43 @@ def compute_worths(
     drafted) is spread over projected points above replacement. K/DEF and
     everyone at or below replacement are $1 roster fillers. Marginal-roster
     and inflation adjustments belong to later slices, not here.
+
+    Replacement level is TWO baselines, not one. ``starter_pct`` of the pool
+    is spread over value above the last STARTER, the rest over value above
+    the deeper ``bench_ranks`` baseline (see :func:`bench_replacement_ranks`)
+    so money keeps flowing past the starter cliff to the bench lots the room
+    actually buys. Each half is normalized on its own, so the two halves sum
+    to the whole pool exactly at every weight; omitting ``bench_ranks``
+    leaves the starter-only sheet unchanged.
     """
-    ranks = replacement_ranks(roster_slots, teams)
-    replacement = _replacement_points(season, ranks)
-    vorp = {
-        row.player_id: _quantize(max(0.0, row.points - replacement[row.position]))
-        for row in season.values()
-        if row.position in VALUED_POSITIONS and row.points is not None
-    }
-    total_vorp = sum(vorp[player_id] for player_id in sorted(vorp))
-    drafted_slots = sum(count for slot, count in roster_slots.items() if slot != "IR")
-    discretionary = teams * (budget - drafted_slots)
-    dollars_per_point = discretionary / total_vorp if total_vorp > 0 else 0.0
+    # pylint: disable=too-many-arguments  # the league shape plus the two
+    # baselines' knobs; grouping them into a record would only rename the
+    # same six numbers. The baseline knobs are keyword-only so no caller can
+    # slide a blend weight into the budget slot.
+    if not 0.0 <= starter_pct <= 1.0:
+        # Out of range the losing half goes NEGATIVE, which prices players
+        # below the $1 floor (and inverts the board past 1.0). The floor is
+        # a guarantee of this function, not of whoever called it.
+        raise ValueError(f"starter_pct must be between 0 and 1, got {starter_pct!r}")
+    starter = replacement_ranks(roster_slots, teams)
+    # No bench baseline means both halves read the SAME baseline, which is
+    # arithmetically identical to the starter-only sheet at any weight.
+    bench = starter if bench_ranks is None else bench_ranks
+    _check_bench_is_deeper(starter, bench)
+    starter_vorp = _vorp(season, starter)
+    bench_vorp = _vorp(season, bench)
+    discretionary = teams * (budget - _drafted_slots(roster_slots))
+    starter_pool, bench_pool = _split_pool(
+        discretionary, starter_pct, starter_vorp, bench_vorp
+    )
+    starter_rate = _dollars_per_point(starter_vorp, starter_pool)
+    bench_rate = _dollars_per_point(bench_vorp, bench_pool)
     return {
-        player_id: _quantize(FLOOR_PRICE + vorp.get(player_id, 0.0) * dollars_per_point)
+        player_id: _quantize(
+            FLOOR_PRICE
+            + starter_vorp.get(player_id, 0.0) * starter_rate
+            + bench_vorp.get(player_id, 0.0) * bench_rate
+        )
         for player_id in sorted(season)
     }
 
@@ -697,12 +907,16 @@ def build_value_sheet(
 ) -> list[SheetRow]:
     """The full ranked, priced player pool for the config's season.
 
-    Every player with an ADP or positive projection at a rosterable
-    position gets worth (VBD dollars), room price (band median with curve
-    fallback), and an NPV-adjusted value: worth plus the keeper premium
-    evaluated at the room price. Ranked by value, ties broken by player
-    id after quantizing — two runs over the same inputs emit identical
-    rows.
+    Every player with an ADP, a positive projection, or worth above the
+    $1 floor, at a rosterable position, gets worth (VBD dollars), room
+    price (band median with curve fallback), and an NPV-adjusted value:
+    worth plus the keeper premium evaluated at the room price. Ranked by
+    value, ties broken by player id after quantizing — two runs over the
+    same inputs emit identical rows.
+
+    That third clause is the engine's precondition, not a draftability
+    judgement: the emitted sheet's above-floor total has to stay equal to
+    the room's discretionary money, or opening inflation is not par.
 
     ``slot_to_roster_by_year`` (each year's draft ``slot_to_roster_id``)
     lets the fit drop unflagged keeper rows hiding in the feeds; without
@@ -710,13 +924,36 @@ def build_value_sheet(
     """
     season = seasons[config.season]
     prices, keeper = _fit_models(seasons, picks_by_year, config, slot_to_roster_by_year)
+    bench = bench_replacement_ranks(
+        picks_by_year,
+        replacement_ranks(config.roster_slots, config.teams),
+        config.bench_skill_slots
+        or skill_slot_target(config.roster_slots, config.teams),
+    )
     worths = compute_worths(
-        season, config.roster_slots, config.teams, config.auction_budget
+        season,
+        config.roster_slots,
+        config.teams,
+        config.auction_budget,
+        bench_ranks=bench,
+        starter_pct=config.starter_pct,
     )
     unranked = []
     for player_id in sorted(season):
         row = season[player_id]
-        draftable = _valid_adp(row.adp) or (row.points or 0) > 0
+        # A priced row always ships. ADP-or-positive-projection is the
+        # draftability question, but worth above the floor is a normalization
+        # fact: `compute_worths` spread the room's money over this player, so
+        # dropping his row would leave the emitted sheet holding less
+        # above-floor value than the room holds money — which is exactly the
+        # quantity `positional_inflation` divides by, and par at open would
+        # break. Reachable when a projection is negative but still above a
+        # negative bench replacement, with no usable ADP.
+        draftable = (
+            worths[player_id] > FLOOR_PRICE
+            or _valid_adp(row.adp)
+            or (row.points or 0) > 0
+        )
         if row.position not in SHEET_POSITIONS or not draftable:
             continue
         room = _quantize(prices.room_price(row.position, row.adp))

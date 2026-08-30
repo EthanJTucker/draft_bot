@@ -9,9 +9,16 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from draftbot.trackdemo import main
 
-from .conftest import REPO_ROOT, FakeTransport
+from .conftest import (
+    REPO_ROOT,
+    VALUATION_TUNABLE_KEYS,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "draft_2025.json"
 DRAFT_ID_2025 = "1257407146123857920"
@@ -119,3 +126,26 @@ def test_replay_demo_with_missing_config_exits_cleanly(tmp_path):
     )
     assert exit_code == 2
     assert "config" in out.getvalue().lower()
+
+
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the track-demo CLI, not a ValueError traceback.
+
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+    """
+    out = io.StringIO()
+    exit_code = main(
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path, key))],
+        http_get=FakeTransport({}),
+        clock=lambda: 1_000.0,
+        out=out,
+    )
+    printed = out.getvalue()
+    assert exit_code == 2
+    assert key in printed
+    assert "Traceback" not in printed

@@ -116,6 +116,11 @@ def _load_config_or_none(config_path: Path, err: TextIO):
             f"error: config file {config_path} is missing required key {error}",
             file=err,
         )
+    except ValueError as error:
+        # A wrong-typed or out-of-range [valuation] knob is incomplete
+        # config, not a crash: load_config raises a ValueError that already
+        # names the key, so print it and fail the load like any bad config.
+        print(f"error: {error}", file=err)
     return None
 
 

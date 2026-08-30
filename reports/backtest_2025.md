@@ -81,19 +81,19 @@ left to drift.
 Why the raw ratio is below par everywhere: the denominator counts EVERY
 unsold sheet row as competing for the room's money, but an auction only
 absorbs 180 lots. The overhang never clears — when the last lot closes,
-$1115 of taper-weighted above-floor sheet value is still
+$1116 of above-floor sheet value is still
 unsold against the $1464 of discretionary money the
 room started with, so about
 76% of a room's money worth of
 priced value never sells. That denominator alone accounts for below
 par: at the opening lot no money has been spent, so every position's
-ratio is exactly the room's money over the whole taper-weighted pool.
+ratio is exactly the room's money over the whole above-floor pool.
 
 Below par is not the floor of it, though, and a denominator re-size
 will not reach the rest. On 36 of the
 159 scored lots the per-position budget SPLIT has overspent that
 position's share, which drives the NUMERATOR negative — measured
-minimum -0.2101, every one of those lots WR. Since
+minimum -0.2141, every one of those lots WR. Since
 the ratio is (budgeted - spent) / left, shrinking the denominator makes
 a negative numerator more negative, not less. The floor is a bound on
 both defects, not a repair of either: raising it was measured, and the

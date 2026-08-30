@@ -11,7 +11,11 @@ import io
 import pytest
 
 from draftbot.valuesheet import main
-from tests.conftest import FakeTransport
+from tests.conftest import (
+    VALUATION_TUNABLE_KEYS,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 from tests.helpers_valuation import projection_row
 
 CONFIG_TOML = """\
@@ -144,8 +148,19 @@ def world_fixture(tmp_path):
 
 def test_cli_writes_the_ranked_priced_pool(world):
     """Exit 0; CSV ranked by value desc with worth, room price, and
-    NPV-adjusted value per player; exact dollars from the tiny league:
-    $18 discretionary over 330 points of value over replacement."""
+    NPV-adjusted value per player; exact dollars from the tiny league.
+
+    $18 discretionary, half onto each replacement baseline: 330 points
+    above the STARTER baseline and 330 above the bench baseline this
+    world's own history derives.
+
+    The bench baseline lands at RB6, deeper than this world's three-back
+    pool, so it clamps to the WORST RB rather than collapsing to zero
+    points. rb3 is that worst RB — replacement level by definition — and
+    stays a $1 filler behind the floor QBs. Zero-point replacement would
+    turn RB bench value into raw points and float rb3 above them, paid
+    for out of every other position's dollars.
+    """
     tmp_path, _, run = world
     out_csv = tmp_path / "sheet.csv"
     code, printed = run("--out", str(out_csv))
@@ -159,7 +174,9 @@ def test_cli_writes_the_ranked_priced_pool(world):
     cells = [line.split(",") for line in rows]
     assert [c[1] for c in cells] == ["qb1", "qb2", "rb1", "rb2", "qb3", "qb4", "rb3"]
     by_id = {c[1]: c for c in cells}
-    assert by_id["qb1"][6] == f"{1 + 200 * 18 / 330:.2f}"  # worth
+    assert by_id["qb1"][6] == f"{1 + 9 * 200 / 330 + 9 * 200 / 330:.2f}"  # worth
+    assert by_id["rb2"][6] == f"{1 + 9 * 10 / 330 + 9 * 10 / 330:.2f}"  # both halves
+    assert by_id["rb3"][6] == "1.00"  # replacement level on BOTH baselines
     assert by_id["rb1"][7] == "10.00"  # room price: the 6-bid band median
     assert by_id["rb1"][8] == "band"
     assert by_id["qb1"][8] == "floor"  # no QB bid history in this world
@@ -296,4 +313,32 @@ def test_config_missing_required_section_exits_2(tmp_path):
     printed = out.getvalue()
     assert "error" in printed.lower()
     assert "keeper" in printed
+    assert "Traceback" not in printed
+
+
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the value-sheet CLI, not a ValueError traceback.
+
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+
+    The library layer already refuses it; this pins the CLI seam,
+    which is where the operator actually meets the error. Editing a
+    tunable under time pressure has to produce a sentence, not a
+    stack.
+    """
+    out = io.StringIO()
+    code = main(
+        ["--config", str(config_with_a_wrong_typed_tunable(tmp_path, key))],
+        http_get=lambda url: b"{}",
+        out=out,
+    )
+    printed = out.getvalue()
+    assert code == 2
+    assert key in printed
+    assert "error" in printed.lower()
     assert "Traceback" not in printed

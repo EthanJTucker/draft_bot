@@ -183,6 +183,12 @@ def main(
             file=err,
         )
         return 2
+    except ValueError as error:
+        # A wrong-typed or out-of-range [valuation] knob is incomplete
+        # config, not a crash: load_config raises a ValueError that already
+        # names the key, so print it and exit 2 like any other bad config.
+        print(f"error: {error}", file=err)
+        return 2
     # cache_dir resolution lives in load_config (anchored to the config
     # file's folder); the CLI only forwards an explicit override.
     cache_dir = Path(args.cache_dir) if args.cache_dir is not None else None

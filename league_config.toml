@@ -46,6 +46,15 @@ band_ratio = 1.6       # ADP band spans adp/ratio .. adp*ratio, inclusive
 min_band_samples = 6   # thinner bands fall back to the fitted log curve
 gamma = 0.8            # per-season discount on the keeper option value
 curve_cap = true       # cap curve prices at the position's max observed bid
+# Worth is split across two replacement baselines: the last starter, and a
+# deeper bench baseline read off this league's own 2023-25 draft composition.
+# starter_pct is the share of the discretionary pool priced off the starter
+# baseline; the rest prices off the bench baseline, so money keeps flowing
+# past the starter cliff to the bench lots the room actually buys.
+starter_pct = 0.5
+# Depth target for the bench baseline, in skill lots league-wide. 0 means
+# derive it from [roster] and teams: 12 * (15 drafted - 1 K - 1 DEF) = 156.
+bench_skill_slots = 0
 
 [me]
 username = "firstrider55"

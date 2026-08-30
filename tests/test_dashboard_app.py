@@ -19,12 +19,18 @@ import io
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from draftbot.dashboard.app import create_app, main, run_poll_loop
 from draftbot.valuesheet import write_csv
 
-from .conftest import REPO_ROOT, FakeTransport
+from .conftest import (
+    REPO_ROOT,
+    VALUATION_TUNABLE_KEYS,
+    FakeTransport,
+    config_with_a_wrong_typed_tunable,
+)
 from .helpers_dashboard import (
     IDENTITY_SLOTS,
     MY_DRAFT_SLOT,
@@ -766,4 +772,36 @@ def test_cli_live_mode_requires_a_sheet():
 
     assert code == 2
     assert "--sheet" in out.getvalue()
+    assert server.app is None
+
+
+@pytest.mark.parametrize("key", VALUATION_TUNABLE_KEYS)
+def test_wrong_typed_valuation_tunable_exits_2_by_name(tmp_path, key):
+    """A wrong-typed ``[valuation]`` knob is a named one-line config
+    error and exit 2 out of the dashboard CLI, not a ValueError traceback.
+
+    Parametrized over EVERY key in the section rather than one of them:
+    the typo lands wherever it lands, and a test that only ever quotes
+    ``starter_pct`` would read as a closed contract while four other
+    keys still tracebacked and a fifth loaded a truthy string clean.
+
+    ``server.app is None`` is the assertion behind never starting
+    the server: a bad config has to be refused before anything binds.
+    """
+    server = CapturingServer()
+    out = io.StringIO()
+    code = main(
+        [
+            "--replay",
+            str(FIXTURE),
+            "--config",
+            str(config_with_a_wrong_typed_tunable(tmp_path, key)),
+        ],
+        server=server,
+        out=out,
+    )
+    printed = out.getvalue()
+    assert code == 2
+    assert key in printed
+    assert "Traceback" not in printed
     assert server.app is None
