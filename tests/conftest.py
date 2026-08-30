@@ -63,3 +63,18 @@ class FakeTransport:
             if path.endswith(suffix):
                 return json.dumps(payload).encode("utf-8")
         raise ConnectionError(f"no canned payload for {url}")
+
+
+def raw_keeper_pick(
+    pick_no: int, player_id: str, slot: int, amount: str, position: str = "WR"
+) -> dict:
+    """A keeper entered by the commissioner as a PRICED draft pick.
+
+    Same shape as :func:`raw_auction_pick` with ``is_keeper`` set, which is
+    how this season's keepers actually reach the feed: a dollar
+    ``metadata.amount`` (the chain price, not a market-clearing bid) rather
+    than a ``draft.settings.budget_<slot>`` key.
+    """
+    return raw_auction_pick(pick_no, player_id, slot, amount, position) | {
+        "is_keeper": True
+    }

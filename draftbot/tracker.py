@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from types import MappingProxyType
 
 from draftbot.config import LeagueConfig
-from draftbot.models import DraftState, to_int
+from draftbot.models import DraftState, Pick, to_int
 from draftbot.sources import SourceTick
 
 # The nomination pointer legitimately keeps naming the just-sold winner for
@@ -38,6 +39,25 @@ FLEX_ELIGIBLE = ("RB", "WR", "TE")
 BUDGET_FROM_OVERRIDE = "hand-keyed with --budget"
 BUDGET_FROM_SLEEPER = "Sleeper's own key"
 BUDGET_FROM_DEFAULT = "the league-wide default"
+# The fourth source, and the one this league actually uses: the
+# commissioner entered every keeper as a PRICED PICK, so the keeper
+# dollars arrive as spend rather than as a reduced budget_<slot>. A slot
+# whose keepers are priced carries the WHOLE league budget by
+# construction, and its post-keeper money is derived, not guessed.
+BUDGET_FROM_KEEPER_PICKS = "the keeper prices in the picks feed"
+
+
+def keeper_priced_slots(picks: Sequence[Pick]) -> frozenset[int]:
+    """Draft slots whose keepers reached the feed as priced picks.
+
+    A parsed dollar amount is the whole test. ``is_keeper`` alone says a
+    slot kept somebody, not what it paid, and a keeper row with no amount
+    (a truncated or malformed feed) leaves the slot's post-keeper money
+    exactly as unknown as it was — which has to keep failing closed.
+    """
+    return frozenset(
+        pick.draft_slot for pick in picks if pick.is_keeper and pick.amount is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -56,6 +76,12 @@ class TeamState:
     purchase_count: int
     open_slots: int
     needs: Mapping[str, int]
+    # Dollars this team's KEEPER picks took out of ``spent``. Zero on a
+    # board whose keepers arrived as a reduced budget_<slot> (there the
+    # budget is already post-keeper), and the keeper spend on a board
+    # whose keepers arrived priced. The inflation model subtracts it to
+    # reach the same discretionary figure from either shape.
+    keeper_spend: int = 0
 
     @property
     def remaining(self) -> int:
@@ -181,13 +207,20 @@ def _ceiling_warnings(breaches: Sequence[tuple[int, str]]) -> list[SettingsMisma
 
 @dataclass(frozen=True)
 class Sale:
-    """One completed sale as the board carries it: id, price, and buying
-    slot — enough for issue #5 to compute the remaining player pool and
-    on-model dollars from the board alone."""
+    """One completed sale as the board carries it: id, price, buying slot,
+    and whether it was a keeper — enough for issue #5 to compute the
+    remaining player pool and on-model dollars from the board alone.
+
+    ``is_keeper`` rides along because a keeper's price is a chain price
+    (prior bid plus the increment, floored), not a market-clearing bid,
+    and the consumer that has to leave it out of the inflation ratio sees
+    only the board.
+    """
 
     player_id: str
     amount: int | None
     draft_slot: int
+    is_keeper: bool = False
 
 
 @dataclass(frozen=True)
@@ -322,26 +355,33 @@ class DraftTracker:
             and len(tick.picks) >= self._observed_sales
         )
         sold = {pick.player_id for pick in tick.picks}
+        # Derived once per tick and passed down rather than re-derived by
+        # each rule: the budget a team shows, the banner that would call
+        # it guessed, and the ceiling that would call it impossible all
+        # have to agree about which slots the feed prices.
+        priced = keeper_priced_slots(tick.picks)
         # Computed once and used twice, so the banner's wording and the
         # page's marks can never name different slots.
-        breaches = self._ceiling_breaches(tick.draft)
+        breaches = self._ceiling_breaches(tick.draft, priced)
         # Same discipline: one evaluation feeds both the RESTART banner and
         # the flag the verdict fails closed on.
         keeper_map_stale = self._keeper_map_is_stale(tick.draft)
         return BoardState(
             status=tick.draft.status,
             paused=tick.draft.paused,
-            teams=tuple(self._team_state(slot, tick) for slot in self._slots(tick)),
+            teams=tuple(
+                self._team_state(slot, tick, priced) for slot in self._slots(tick)
+            ),
             nomination=self._resolve_nomination(tick.draft, sold, picks_trusted),
             settings_warnings=self._settings_warnings(
-                tick.draft, breaches, keeper_map_stale
+                tick.draft, breaches, keeper_map_stale, priced
             ),
             impossible_keeper_slots=tuple(slot for slot, _ in breaches),
             keeper_map_stale=keeper_map_stale,
             off_model_player_ids=self._off_model(tick),
             stale_endpoints=tick.stale_endpoints,
             sales=tuple(
-                Sale(pick.player_id, pick.amount, pick.draft_slot)
+                Sale(pick.player_id, pick.amount, pick.draft_slot, pick.is_keeper)
                 for pick in tick.picks
             ),
             timer_end_at=tick.draft.timer_end_at,
@@ -363,8 +403,10 @@ class DraftTracker:
         draft: DraftState,
         breaches: Sequence[tuple[int, str]],
         keeper_map_stale: bool,
+        priced: AbstractSet[int] = frozenset(),
     ) -> tuple[SettingsMismatch, ...]:
-        """Assumption diffs, the pre-entry keeper condition, the real
+        """Assumption diffs, the pre-entry keeper condition, a budget
+        figure that fights the keeper prices already in the feed, the real
         budget a hand-keyed ``--budget`` override discards, money no
         keeper roster could have left over, and a keeper bridge the draft
         order has moved out from under — none of which the operator should
@@ -377,8 +419,9 @@ class DraftTracker:
         """
         warnings = self._keeper_map_warnings(draft) if keeper_map_stale else []
         warnings.extend(diff_settings(draft, self._expected_settings))
-        warnings.extend(self._keeper_budget_warnings(draft))
-        warnings.extend(self._override_warnings(draft))
+        warnings.extend(self._keeper_budget_warnings(draft, priced))
+        warnings.extend(self._keeper_price_conflicts(draft, priced))
+        warnings.extend(self._override_warnings(draft, priced))
         warnings.extend(_ceiling_warnings(breaches))
         return tuple(warnings)
 
@@ -446,9 +489,11 @@ class DraftTracker:
             )
         ]
 
-    def uncovered_keeper_slots(self, draft: DraftState) -> tuple[int, ...]:
+    def uncovered_keeper_slots(
+        self, draft: DraftState, priced: AbstractSet[int] = frozenset()
+    ) -> tuple[int, ...]:
         """Keeper-holding DRAFT SLOTS showing the league-wide default
-        because neither source carries real money for them, in slot order.
+        because NO source carries real money for them, in slot order.
 
         This is the set whose money is provably wrong rather than merely
         unentered: a team that kept players paid for them, so the full
@@ -456,6 +501,12 @@ class DraftTracker:
         slot at the default is unverified, not wrong, which is why the
         banner and the page's room mark both key on this set and not on
         every defaulted slot.
+
+        ``priced`` is the third source and covers a slot exactly as the
+        other two do. Its slots DO show the full league budget, and that
+        is not the fiction this set exists to name: the keeper dollars
+        are in ``spent`` instead, so the post-keeper figure on screen is
+        derived from prices the feed actually carries.
         """
         return tuple(
             sorted(
@@ -464,10 +515,13 @@ class DraftTracker:
                 if players
                 and slot not in draft.budget_by_slot
                 and slot not in self._budget_overrides
+                and slot not in priced
             )
         )
 
-    def _keeper_budget_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+    def _keeper_budget_warnings(
+        self, draft: DraftState, priced: AbstractSet[int] = frozenset()
+    ) -> list[SettingsMismatch]:
         """The pre-entry keeper condition: a keeper team with no real
         budget from EITHER source shows the config default, which
         overstates what it can spend. The warning holds while ANY
@@ -480,7 +534,7 @@ class DraftTracker:
         overridden slot shows a real number; listing it anyway would put
         'shown at the $200 default' on screen beside a correct figure.
         """
-        missing = self.uncovered_keeper_slots(draft)
+        missing = self.uncovered_keeper_slots(draft, priced)
         if not missing:
             return []
         return [
@@ -495,7 +549,54 @@ class DraftTracker:
             )
         ]
 
-    def _override_warnings(self, draft: DraftState) -> list[SettingsMismatch]:
+    def _keeper_price_conflicts(
+        self, draft: DraftState, priced: AbstractSet[int]
+    ) -> list[SettingsMismatch]:
+        """The REFUSED banner: a budget figure entered for a slot whose
+        keepers the feed already prices.
+
+        Both other sources carry the money a team has for the WHOLE draft,
+        which on a keeper board is the POST-keeper figure off the league
+        sheet. When the keepers arrive priced, those same dollars are
+        already in ``spent``, so honoring the entered figure would subtract
+        them twice and can drive a team's remaining money NEGATIVE. The
+        measured prices win — they are observation, not transcription —
+        and the discarded figure is named by slot and by source, because a
+        lever that silently does nothing is worse than one that refuses.
+        """
+        discarded = []
+        for slot in sorted(priced):
+            if slot in self._budget_overrides:
+                amount = self._budget_overrides[slot]
+                discarded.append(f"slot {slot} = ${amount} ({BUDGET_FROM_OVERRIDE})")
+            elif slot in draft.budget_by_slot:
+                amount = draft.budget_by_slot[slot]
+                discarded.append(
+                    f"slot {slot} = ${amount} (budget_{slot}, {BUDGET_FROM_SLEEPER})"
+                )
+        if not discarded:
+            return []
+        return [
+            SettingsMismatch(
+                field="budget_keeper_conflict",
+                expected=(
+                    "one source of keeper money per slot: either a "
+                    "post-keeper budget figure or priced keeper picks"
+                ),
+                actual=(
+                    f"{'; '.join(discarded)} — these slots' keepers are "
+                    "already priced in the picks feed and counted as spend, "
+                    "so the entered figure would subtract the same keeper "
+                    "dollars twice; DISCARDED, and the slots show the "
+                    f"${self._config.auction_budget} league budget against "
+                    "their measured keeper spend"
+                ),
+            )
+        ]
+
+    def _override_warnings(
+        self, draft: DraftState, priced: AbstractSet[int] = frozenset()
+    ) -> list[SettingsMismatch]:
         """The REPLACED banner: an override outranks a ``budget_<slot>``
         key, so it can discard real server data.
 
@@ -506,6 +607,11 @@ class DraftTracker:
         """
         kept, discarded = [], []
         for slot in sorted(self._budget_overrides):
+            if slot in priced:
+                # Neither figure is shown on a priced slot: the keeper
+                # conflict banner one line up already said so, and
+                # claiming "$96 shown" here would contradict it.
+                continue
             amount = self._budget_overrides[slot]
             live = draft.budget_by_slot.get(slot)
             if live is not None and live != amount:
@@ -521,25 +627,45 @@ class DraftTracker:
             )
         ]
 
-    def _resolved_budget(self, slot: int, draft: DraftState) -> tuple[int, str]:
+    def _resolved_budget(
+        self, slot: int, draft: DraftState, priced: AbstractSet[int] = frozenset()
+    ) -> tuple[int, str]:
         """One slot's budget and where it came from.
 
-        The single statement of the precedence: explicit operator input
-        first, then the remote value, and ONLY then the league-wide
-        default — which is a fiction on a keeper board, so the provenance
-        travels with the number rather than being re-derived by each
-        caller. ``TeamState.budget_is_default`` and the ceiling banner
-        both read this, and a page that marks a figure the banner does
-        not name (or the reverse) is exactly the disagreement that keeps
-        them in one place.
+        The single statement of the precedence: priced keeper picks first,
+        then explicit operator input, then the remote value, and ONLY then
+        the league-wide default — which is a fiction on a keeper board, so
+        the provenance travels with the number rather than being
+        re-derived by each caller. ``TeamState.budget_is_default`` and the
+        ceiling banner both read this, and a page that marks a figure the
+        banner does not name (or the reverse) is exactly the disagreement
+        that keeps them in one place.
+
+        Priced keeper picks lead DESPITE outranking the operator's own
+        lever, which every other rule here refuses to do. They are not
+        another opinion about the same quantity: the other three sources
+        all name a team's money for the WHOLE draft, which on a keeper
+        board is the post-keeper figure, while priced picks put the keeper
+        dollars in ``spent`` and leave the budget at the full league
+        amount. Taking the entered figure on top of them subtracts the
+        keeper money twice and can show a team a negative remaining. The
+        refusal is never silent — it raises its own banner naming the slot
+        and the source — and the number it keeps is measured rather than
+        transcribed. The amount here is the same integer as the default;
+        the SOURCE is the whole difference, because it is what the verdict
+        fails closed on.
         """
+        if slot in priced:
+            return self._config.auction_budget, BUDGET_FROM_KEEPER_PICKS
         if slot in self._budget_overrides:
             return self._budget_overrides[slot], BUDGET_FROM_OVERRIDE
         if slot in draft.budget_by_slot:
             return draft.budget_by_slot[slot], BUDGET_FROM_SLEEPER
         return self._config.auction_budget, BUDGET_FROM_DEFAULT
 
-    def _ceiling_breaches(self, draft: DraftState) -> list[tuple[int, str]]:
+    def _ceiling_breaches(
+        self, draft: DraftState, priced: AbstractSet[int] = frozenset()
+    ) -> list[tuple[int, str]]:
         """Every keeper slot whose budget is IMPOSSIBLE, as (slot,
         message) in slot order: provably wrong, not merely unverified.
 
@@ -555,10 +681,20 @@ class DraftTracker:
         so the message names the source instead.
 
         The carve-out: a slot the keeper_budgets banner ALREADY names
-        (keeper team, no real money from either source, showing the
-        league default) is skipped. Its default can breach the same
-        ceiling, but that is one hole, and reporting it twice is how a
-        banner becomes wallpaper.
+        (keeper team, no real money from any source, showing the league
+        default) is skipped. Its default can breach the same ceiling, but
+        that is one hole, and reporting it twice is how a banner becomes
+        wallpaper.
+
+        The second carve-out, and the reason it is not a weakening: a slot
+        whose keepers the feed PRICES has nothing left to infer. The whole
+        rule is a lower bound on money that must already be gone, drawn
+        from the floor because the real keeper cost is unreadable. On a
+        priced slot it is readable — the dollars are in ``spent``, and the
+        budget is the full league amount by construction, so ``budget >
+        budget - floor * N`` holds for every such slot and would fire the
+        IMPOSSIBLE banner on all twelve teams of a correctly-entered
+        board.
 
         The CLI cannot make this check — it parses before the network on
         purpose, and keeper lists arrive with the rosters — so it lands
@@ -570,12 +706,12 @@ class DraftTracker:
         money unless this set says otherwise.
         """
         floor = self._config.keeper_cost_floor
-        uncovered = set(self.uncovered_keeper_slots(draft))
+        uncovered = set(self.uncovered_keeper_slots(draft, priced))
         breaches = []
         for slot, keepers in sorted(self._keepers_by_slot.items()):
-            if not keepers:
+            if not keepers or slot in priced:
                 continue
-            amount, source = self._resolved_budget(slot, draft)
+            amount, source = self._resolved_budget(slot, draft, priced)
             if slot in uncovered:
                 # THE CARVE-OUT. This slot's money is the league default,
                 # which breaches the ceiling on any keeper roster — but
@@ -631,17 +767,43 @@ class DraftTracker:
             return sorted(tick.draft.slot_to_roster_id)
         return list(range(1, self._config.teams + 1))
 
-    def _team_state(self, slot: int, tick: SourceTick) -> TeamState:
-        purchases = [pick for pick in tick.picks if pick.draft_slot == slot]
-        keepers = self._keepers_by_slot.get(slot, ())
+    def _team_state(
+        self, slot: int, tick: SourceTick, priced: AbstractSet[int] = frozenset()
+    ) -> TeamState:
+        """One team's standing, with every kept player counted ONCE.
+
+        This season's keepers are reachable from two sources at the same
+        time — the roster's ``keepers`` array and the picks feed — and the
+        same player through both is still one player on one roster slot.
+        Taking the union rather than either source alone is what makes
+        that true from both directions: a keeper the feed carries and the
+        rosters do not still fills a slot, and so does the reverse.
+
+        Keeper dollars stay in ``spent`` (that is how the post-keeper
+        money derives at all) but keeper picks are NOT purchases: they
+        never occupied an auction lot, and counting them as one is what
+        put ``open_slots`` three low and the max bid three high.
+        """
+        picks = [pick for pick in tick.picks if pick.draft_slot == slot]
+        keeper_picks = [pick for pick in picks if pick.is_keeper]
+        purchases = [pick for pick in picks if not pick.is_keeper]
+        kept = list(self._keepers_by_slot.get(slot, ()))
+        keeper_positions = {}
+        for pick in keeper_picks:
+            keeper_positions[pick.player_id] = pick.metadata.get("position")
+            if pick.player_id not in kept:
+                kept.append(pick.player_id)
         # The default is a fiction on a keeper board, so the flag it
         # raises must survive all the way to the page and the verdict.
         # An override that merely fills a hole is the ordinary case; one
-        # that discards a real budget_<slot> is named by slot in the
-        # standing settings banner.
-        budget, source = self._resolved_budget(slot, tick.draft)
-        open_slots = max(0, self._config.drafted_slots - len(keepers) - len(purchases))
-        positions = [self._player_positions.get(player_id) for player_id in keepers]
+        # that discards a real budget_<slot>, or that fights keeper prices
+        # already in the feed, is named by slot in the standing banner.
+        budget, source = self._resolved_budget(slot, tick.draft, priced)
+        open_slots = max(0, self._config.drafted_slots - len(kept) - len(purchases))
+        positions = [
+            keeper_positions.get(player_id) or self._player_positions.get(player_id)
+            for player_id in kept
+        ]
         positions.extend(
             pick.metadata.get("position") or self._player_positions.get(pick.player_id)
             for pick in purchases
@@ -651,13 +813,14 @@ class DraftTracker:
             roster_id=tick.draft.slot_to_roster_id.get(slot),
             budget=budget,
             budget_is_default=source == BUDGET_FROM_DEFAULT,
-            spent=sum(pick.amount or 0 for pick in purchases),
-            keeper_count=len(keepers),
+            spent=sum(pick.amount or 0 for pick in picks),
+            keeper_count=len(kept),
             purchase_count=len(purchases),
             open_slots=open_slots,
             # Read-only proxy: a consumer decrementing needs in place would
             # corrupt every later reader of the same board.
             needs=MappingProxyType(self._compute_needs(positions)),
+            keeper_spend=sum(pick.amount or 0 for pick in keeper_picks),
         )
 
     def _compute_needs(self, positions: Sequence[str | None]) -> dict[str, int]:
