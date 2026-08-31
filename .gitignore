@@ -6,3 +6,7 @@ data/cache/
 .coverage
 data/
 .venv/
+
+# Personal league notes, post-mortems and any config carrying real
+# league members' data. The tool is public; these are not.
+private/
